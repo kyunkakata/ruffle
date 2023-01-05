@@ -8,6 +8,7 @@ export interface Options {
     logLevel: LogLevel;
     preferredRenderer: RenderBackend;
     showSwfDownload: boolean;
+    autostart: boolean;
 }
 
 interface OptionElement<T> {

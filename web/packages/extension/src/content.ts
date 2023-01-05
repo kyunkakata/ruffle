@@ -174,6 +174,9 @@ function isXMLDocument(): boolean {
             logLevel: options.logLevel,
             showSwfDownload: options.showSwfDownload,
             preferredRenderer: options.preferredRenderer,
+            autoplay: options.autostart ? "on" : "auto",
+            unmuteOverlay: options.autostart ? "hidden" : "visible",
+            splashScreen: !options.autostart,
         },
     });
 })();

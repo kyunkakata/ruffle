@@ -8,6 +8,7 @@ const DEFAULT_OPTIONS: Options = {
     logLevel: "error" as LogLevel,
     preferredRenderer: "webgpu" as RenderBackend,
     showSwfDownload: false,
+    autostart: false,
 };
 
 export let i18n: {
