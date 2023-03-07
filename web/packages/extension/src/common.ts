@@ -1,11 +1,12 @@
 import * as utils from "./utils";
-import type { LogLevel } from "ruffle-core";
+import type { LogLevel, RenderBackend } from "ruffle-core";
 
 export interface Options {
     ruffleEnable: boolean;
     ignoreOptout: boolean;
     warnOnUnsupportedContent: boolean;
     logLevel: LogLevel;
+    preferredRenderer: RenderBackend;
     showSwfDownload: boolean;
 }
 
