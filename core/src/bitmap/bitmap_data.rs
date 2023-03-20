@@ -17,7 +17,7 @@ use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::Transform;
 use ruffle_wstr::WStr;
 use std::ops::Range;
-use swf::{BlendMode, Rectangle, Twips};
+use swf::{BlendMode, Fixed8, Rectangle, Twips};
 use tracing::instrument;
 
 /// An implementation of the Lehmer/Park-Miller random number generator
@@ -43,7 +43,7 @@ impl LehmerRng {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Collect)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Collect)]
 #[collect(no_drop)]
 pub struct Color(i32);
 
@@ -194,7 +194,7 @@ bitflags! {
         const GREEN = 1 << 1;
         const BLUE = 1 << 2;
         const ALPHA = 1 << 3;
-        const RGB = Self::RED.bits | Self::GREEN.bits | Self::BLUE.bits;
+        const RGB = Self::RED.bits() | Self::GREEN.bits() | Self::BLUE.bits();
     }
 }
 
@@ -243,7 +243,8 @@ enum DirtyState {
 mod wrapper {
     use crate::context::RenderContext;
     use crate::{avm2::Value as Avm2Value, context::UpdateContext};
-    use gc_arena::{Collect, GcCell};
+    use gc_arena::{Collect, GcCell, MutationContext};
+    use ruffle_render::bitmap::BitmapHandle;
     use ruffle_render::commands::CommandHandler;
 
     use super::{copy_pixels_to_bitmapdata, BitmapData, DirtyState};
@@ -308,6 +309,18 @@ mod wrapper {
             self.0
         }
 
+        /// Provides access to the underlying `BitmapHandle`.
+        /// If the CPU pixels are dirty, syncs them to the GPU.
+        /// If the GPU pixels are dirty, then handle is returned immediately
+        /// without waiting for the sync to complete, as a BitmapHandle can
+        /// only be used to access the GPU data. Unlike `overwrite_cpu_pixels_from_gpu`,
+        /// this does not cancel the GPU -> CPU sync.
+        pub fn bitmap_handle(&self, context: &mut UpdateContext<'_, 'gc>) -> BitmapHandle {
+            let mut bitmap_data = self.0.write(context.gc_context);
+            bitmap_data.update_dirty_texture(context.renderer);
+            bitmap_data.bitmap_handle(context.renderer).unwrap()
+        }
+
         // Provides access to the underlying `BitmapData`.
         // This should only be used when you will be overwriting the entire
         // `pixels` vec without reading from it. Cancels any in-progress GPU -> CPU sync.
@@ -349,6 +362,17 @@ mod wrapper {
 
         pub fn transparency(&self) -> bool {
             self.0.read().transparency
+        }
+
+        pub fn check_valid(
+            &self,
+            activation: &mut crate::avm2::Activation<'_, 'gc>,
+        ) -> Result<(), crate::avm2::Error<'gc>> {
+            self.0.read().check_valid(activation)
+        }
+
+        pub fn dispose(&self, mc: MutationContext<'gc, '_>) {
+            self.0.write(mc).dispose();
         }
 
         pub fn render(&self, smoothing: bool, context: &mut RenderContext<'_, 'gc>) {
@@ -475,10 +499,6 @@ impl<'gc> BitmapData<'gc> {
         self.transparency
     }
 
-    pub fn set_transparency(&mut self, transparency: bool) {
-        self.transparency = transparency;
-    }
-
     pub fn set_cpu_dirty(&mut self, dirty: bool) {
         let new_state = if dirty {
             DirtyState::CpuModified
@@ -534,23 +554,20 @@ impl<'gc> BitmapData<'gc> {
         x >= 0 && x < self.width() as i32 && y >= 0 && y < self.height() as i32
     }
 
-    pub fn get_pixel_raw(&self, x: u32, y: u32) -> Option<Color> {
-        if x >= self.width() || y >= self.height() {
-            return None;
+    pub fn get_pixel32(&self, x: u32, y: u32) -> Color {
+        if x < self.width && y < self.height {
+            self.get_pixel32_raw(x, y).to_un_multiplied_alpha()
+        } else {
+            Color(0)
         }
-
-        self.pixels.get((x + y * self.width()) as usize).copied()
     }
 
-    pub fn get_pixel32(&self, x: i32, y: i32) -> Color {
-        self.get_pixel_raw(x as u32, y as u32)
-            .map(|f| f.to_un_multiplied_alpha())
-            .unwrap_or_else(|| 0.into())
-    }
-
-    pub fn get_pixel(&self, x: i32, y: i32) -> i32 {
-        if self.is_point_in_bounds(x, y) {
-            self.get_pixel32(x, y).with_alpha(0x0).into()
+    pub fn get_pixel(&self, x: u32, y: u32) -> i32 {
+        if x < self.width && y < self.height {
+            self.get_pixel32_raw(x, y)
+                .to_un_multiplied_alpha()
+                .with_alpha(0x0)
+                .into()
         } else {
             0
         }
@@ -601,60 +618,77 @@ impl<'gc> BitmapData<'gc> {
     }
 
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
-        let current_alpha = self.get_pixel_raw(x, y).map(|p| p.alpha()).unwrap_or(0);
-        self.set_pixel32(x as i32, y as i32, color.with_alpha(current_alpha));
+        if x < self.width && y < self.height {
+            if self.transparency {
+                let current_alpha = self.get_pixel32_raw(x, y).alpha();
+                let color = color.with_alpha(current_alpha).to_premultiplied_alpha(true);
+                self.set_pixel32_raw(x, y, color);
+            } else {
+                self.set_pixel32_raw(x, y, color.with_alpha(0xFF));
+            }
+            self.set_cpu_dirty(true);
+        }
     }
 
-    pub fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
-        let width = self.width();
-        self.pixels[(x + y * width) as usize] = color;
+    #[inline]
+    fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
+        self.pixels[(x + y * self.width) as usize] = color;
+    }
+
+    #[inline]
+    fn get_pixel32_raw(&self, x: u32, y: u32) -> Color {
+        self.pixels[(x + y * self.width()) as usize]
+    }
+
+    pub fn set_pixel32(&mut self, x: u32, y: u32, color: Color) {
+        if x < self.width && y < self.height {
+            self.set_pixel32_raw(x, y, color.to_premultiplied_alpha(self.transparency()));
+            self.set_cpu_dirty(true);
+        }
+    }
+
+    pub fn fill_rect(&mut self, x0: u32, y0: u32, width: u32, height: u32, color: Color) {
+        let x1 = (x0 + width).min(self.width);
+        let y1 = (y0 + height).min(self.height);
+        let color = color.to_premultiplied_alpha(self.transparency());
+
+        for x in x0..x1 {
+            for y in y0..y1 {
+                self.set_pixel32_raw(x, y, color);
+            }
+        }
         self.set_cpu_dirty(true);
     }
 
-    pub fn set_pixel32(&mut self, x: i32, y: i32, color: Color) {
-        if self.is_point_in_bounds(x, y) {
-            self.set_pixel32_raw(
-                x as u32,
-                y as u32,
-                color.to_premultiplied_alpha(self.transparency()),
-            )
-        }
-    }
-
-    pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
-        for x_offset in 0..width {
-            for y_offset in 0..height {
-                self.set_pixel32((x + x_offset) as i32, (y + y_offset) as i32, color)
-            }
-        }
-    }
-
     pub fn flood_fill(&mut self, x: u32, y: u32, replace_color: Color) {
-        let expected_color = self.get_pixel_raw(x, y).unwrap_or_else(|| 0.into());
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let expected_color = self.get_pixel32_raw(x, y);
 
         let mut pending = vec![(x, y)];
 
         while !pending.is_empty() {
             if let Some((x, y)) = pending.pop() {
-                if let Some(old_color) = self.get_pixel_raw(x, y) {
-                    if old_color == expected_color {
-                        if x > 0 {
-                            pending.push((x - 1, y));
-                        }
-                        if y > 0 {
-                            pending.push((x, y - 1));
-                        }
-                        if x < self.width() - 1 {
-                            pending.push((x + 1, y))
-                        }
-                        if y < self.height() - 1 {
-                            pending.push((x, y + 1));
-                        }
-                        self.set_pixel32_raw(x, y, replace_color);
+                let old_color = self.get_pixel32_raw(x, y);
+                if old_color == expected_color {
+                    if x > 0 {
+                        pending.push((x - 1, y));
                     }
+                    if y > 0 {
+                        pending.push((x, y - 1));
+                    }
+                    if x < self.width() - 1 {
+                        pending.push((x + 1, y))
+                    }
+                    if y < self.height() - 1 {
+                        pending.push((x, y + 1));
+                    }
+                    self.set_pixel32_raw(x, y, replace_color);
                 }
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     pub fn noise(
@@ -715,6 +749,7 @@ impl<'gc> BitmapData<'gc> {
                 self.set_pixel32_raw(x, y, pixel_color);
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     pub fn copy_channel(
@@ -728,25 +763,31 @@ impl<'gc> BitmapData<'gc> {
         let (min_x, min_y) = dest_point;
         let (src_min_x, src_min_y, src_max_x, src_max_y) = src_rect;
 
+        let channel_shift: u32 = match source_channel {
+            // red
+            1 => 16,
+            // green
+            2 => 8,
+            // blue
+            4 => 0,
+            // alpha
+            8 => 24,
+            _ => 0,
+        };
+
         for x in src_min_x.max(0)..src_max_x.min(source_bitmap.width()) {
             for y in src_min_y.max(0)..src_max_y.min(source_bitmap.height()) {
-                if self.is_point_in_bounds(x as i32 + min_x as i32, y as i32 + min_y as i32) {
+                let dst_x = x as i32 + min_x as i32;
+                let dst_y = y as i32 + min_y as i32;
+                if self.is_point_in_bounds(dst_x, dst_y) {
                     let original_color: u32 = self
-                        .get_pixel32(x as i32 + min_x as i32, y as i32 + min_y as i32)
+                        .get_pixel32_raw(dst_x as u32, dst_y as u32)
+                        .to_un_multiplied_alpha()
                         .into();
-                    let source_color: u32 = source_bitmap.get_pixel32(x as i32, y as i32).into();
-
-                    let channel_shift: u32 = match source_channel {
-                        // red
-                        1 => 16,
-                        // green
-                        2 => 8,
-                        // blue
-                        4 => 0,
-                        // alpha
-                        8 => 24,
-                        _ => 0,
-                    };
+                    let source_color: u32 = source_bitmap
+                        .get_pixel32_raw(x, y)
+                        .to_un_multiplied_alpha()
+                        .into();
 
                     let source_part = (source_color >> channel_shift) & 0xFF;
 
@@ -762,14 +803,16 @@ impl<'gc> BitmapData<'gc> {
                         _ => original_color,
                     };
 
-                    self.set_pixel32(
-                        x as i32 + min_x as i32,
-                        y as i32 + min_y as i32,
-                        (result_color as i32).into(),
+                    self.set_pixel32_raw(
+                        dst_x as u32,
+                        dst_y as u32,
+                        Color(result_color as i32).to_premultiplied_alpha(self.transparency),
                     );
                 }
             }
         }
+
+        self.set_cpu_dirty(true);
     }
 
     pub fn color_transform(
@@ -780,18 +823,30 @@ impl<'gc> BitmapData<'gc> {
         y_max: u32,
         color_transform: ColorTransform,
     ) {
-        for x in x_min..x_max.min(self.width()) {
-            for y in y_min..y_max.min(self.height()) {
-                let color = self.get_pixel_raw(x, y).unwrap().to_un_multiplied_alpha();
+        // Flash bug: applying a color transform with only an alpha multiplier > 1 has no effect.
+        if color_transform.r_mult != Fixed8::ONE
+            || color_transform.g_mult != Fixed8::ONE
+            || color_transform.b_mult != Fixed8::ONE
+            || color_transform.a_mult < Fixed8::ONE
+            || color_transform.r_add != 0
+            || color_transform.g_add != 0
+            || color_transform.b_add != 0
+            || color_transform.a_add != 0
+        {
+            for x in x_min..x_max.min(self.width()) {
+                for y in y_min..y_max.min(self.height()) {
+                    let color = self.get_pixel32_raw(x, y).to_un_multiplied_alpha();
 
-                let color = color_transform * swf::Color::from(color);
+                    let color = color_transform * swf::Color::from(color);
 
-                self.set_pixel32_raw(
-                    x,
-                    y,
-                    Color::from(color).to_premultiplied_alpha(self.transparency()),
-                )
+                    self.set_pixel32_raw(
+                        x,
+                        y,
+                        Color::from(color).to_premultiplied_alpha(self.transparency()),
+                    )
+                }
             }
+            self.set_cpu_dirty(true);
         }
     }
 
@@ -808,7 +863,7 @@ impl<'gc> BitmapData<'gc> {
 
         for x in 0..self.width() {
             for y in 0..self.height() {
-                let pixel_raw: i32 = self.get_pixel_raw(x, y).unwrap().into();
+                let pixel_raw: i32 = self.get_pixel32_raw(x, y).into();
                 let color_matches = if find_color {
                     (pixel_raw & mask) == color
                 } else {
@@ -858,11 +913,9 @@ impl<'gc> BitmapData<'gc> {
                     continue;
                 }
 
-                let source_color = source_bitmap
-                    .get_pixel_raw(src_x as u32, src_y as u32)
-                    .unwrap();
+                let source_color = source_bitmap.get_pixel32_raw(src_x as u32, src_y as u32);
 
-                let mut dest_color = self.get_pixel_raw(dest_x as u32, dest_y as u32).unwrap();
+                let mut dest_color = self.get_pixel32_raw(dest_x as u32, dest_y as u32);
 
                 if let Some((alpha_bitmap, (alpha_min_x, alpha_min_y))) = alpha_source {
                     let alpha_x = src_x - src_min_x + alpha_min_x;
@@ -876,8 +929,7 @@ impl<'gc> BitmapData<'gc> {
 
                     let final_alpha = if alpha_bitmap.transparency {
                         let a = alpha_bitmap
-                            .get_pixel_raw(alpha_x as u32, alpha_y as u32)
-                            .unwrap()
+                            .get_pixel32_raw(alpha_x as u32, alpha_y as u32)
                             .alpha();
 
                         if source_bitmap.transparency {
@@ -927,6 +979,7 @@ impl<'gc> BitmapData<'gc> {
                 self.set_pixel32_raw(dest_x as u32, dest_y as u32, dest_color);
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     pub fn merge(
@@ -951,13 +1004,11 @@ impl<'gc> BitmapData<'gc> {
                 }
 
                 let source_color = source_bitmap
-                    .get_pixel_raw(src_x as u32, src_y as u32)
-                    .unwrap()
+                    .get_pixel32_raw(src_x as u32, src_y as u32)
                     .to_un_multiplied_alpha();
 
                 let dest_color = self
-                    .get_pixel_raw(dest_x as u32, dest_y as u32)
-                    .unwrap()
+                    .get_pixel32_raw(dest_x as u32, dest_y as u32)
                     .to_un_multiplied_alpha();
 
                 let red_mult = rgba_mult.0.clamp(0, 256) as u16;
@@ -987,6 +1038,7 @@ impl<'gc> BitmapData<'gc> {
                 );
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     // Unlike `copy_channel` and `copy_pixels`, this function seems to
@@ -1019,8 +1071,7 @@ impl<'gc> BitmapData<'gc> {
 
                 let source_color = source_bitmap
                     .unwrap_or(self)
-                    .get_pixel_raw(src_x as u32, src_y as u32)
-                    .unwrap()
+                    .get_pixel32_raw(src_x as u32, src_y as u32)
                     .to_un_multiplied_alpha();
 
                 let r = channel_arrays.0[source_color.red() as usize];
@@ -1034,6 +1085,7 @@ impl<'gc> BitmapData<'gc> {
                 self.set_pixel32_raw(dest_x as u32, dest_y as u32, mix_color);
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1101,8 +1153,8 @@ impl<'gc> BitmapData<'gc> {
                         // because of the saturating conversion to u8
                         *noise_c = if c == 3 { 1.0 } else { -1.0 };
 
-                        // SAFETY: `c` is always in 0..4, so `1 << c` is a valid `ChannelOptions`.
-                        let c = unsafe { ChannelOptions::from_bits_unchecked(1 << c) };
+                        // `c` is always in 0..4, so `1 << c` is never actually truncated here
+                        let c = ChannelOptions::from_bits_truncate(1 << c);
                         if channel_options.contains(c) {
                             *noise_c = turb.turbulence(
                                 channel,
@@ -1140,6 +1192,7 @@ impl<'gc> BitmapData<'gc> {
                 self.set_pixel32_raw(x, y, Color::argb(color[3], color[0], color[1], color[2]));
             }
         }
+        self.set_cpu_dirty(true);
     }
 
     pub fn scroll(&mut self, x: i32, y: i32) {
@@ -1176,23 +1229,25 @@ impl<'gc> BitmapData<'gc> {
         while src_y != y_to {
             let mut src_x = x_from;
             while src_x != x_to {
-                let color = self.get_pixel_raw(src_x as u32, src_y as u32).unwrap();
+                let color = self.get_pixel32_raw(src_x as u32, src_y as u32);
                 self.set_pixel32_raw((src_x + x) as u32, (src_y + y) as u32, color);
                 src_x += dx;
             }
             src_y += dy;
         }
+
+        self.set_cpu_dirty(true);
     }
 
     /// This implements the threshold operation generically over the test operation performed for each pixel
     /// Returns the number of pixels modified
     #[allow(clippy::too_many_arguments)]
-    fn threshold_internal<Op: Fn(u32, u32) -> bool>(
+    pub fn threshold(
         &mut self,
         source_bitmap: &Self,
         src_rect: (i32, i32, i32, i32),
         dest_point: (i32, i32),
-        operation: Op,
+        operation: ThresholdOperation,
         threshold: u32,
         colour: u32,
         mask: u32,
@@ -1223,20 +1278,18 @@ impl<'gc> BitmapData<'gc> {
 
                 // Extract source colour
                 let source_color = source_bitmap
-                    .get_pixel_raw(src_x as u32, src_y as u32)
-                    .unwrap()
+                    .get_pixel32_raw(src_x as u32, src_y as u32)
                     .to_un_multiplied_alpha();
 
                 // If the test, as defined by the operation pass then set to input colour
-                if operation(source_color.0 as u32 & mask, masked_threshold) {
+                if operation.matches(source_color.0 as u32 & mask, masked_threshold) {
                     modified_count += 1;
                     self.set_pixel32_raw(dest_x as u32, dest_y as u32, Color(colour as _));
                 } else {
                     // If the test fails, but copy_source is true then take the colour from the source
                     if copy_source {
                         let new_color = source_bitmap
-                            .get_pixel_raw(dest_x as u32, dest_y as u32)
-                            .unwrap()
+                            .get_pixel32_raw(dest_x as u32, dest_y as u32)
                             .to_un_multiplied_alpha();
 
                         self.set_pixel32_raw(dest_x as u32, dest_y as u32, new_color);
@@ -1244,46 +1297,9 @@ impl<'gc> BitmapData<'gc> {
                 }
             }
         }
+        self.set_cpu_dirty(true);
 
         modified_count
-    }
-
-    /// Perform the threshold operation
-    /// Returns the number of modified pixels
-    #[allow(clippy::too_many_arguments)]
-    pub fn threshold(
-        &mut self,
-        source_bitmap: &Self,
-        src_rect: (i32, i32, i32, i32),
-        dest_point: (i32, i32),
-        operation: &WStr,
-        threshold: u32,
-        colour: u32,
-        mask: u32,
-        copy_source: bool,
-    ) -> u32 {
-        // Define the test that will be performed for each pixel
-        let op = match operation.to_utf8_lossy().as_ref() {
-            "==" => |v, mt| v == mt,
-            "!=" => |v, mt| v != mt,
-            "<" => |v, mt| v < mt,
-            "<=" => |v, mt| v <= mt,
-            ">" => |v, mt| v > mt,
-            ">=" => |v, mt| v >= mt,
-            // For undefined/invalid operations FP seems to just return 0 here
-            _ => return 0,
-        };
-
-        self.threshold_internal(
-            source_bitmap,
-            src_rect,
-            dest_point,
-            op,
-            threshold,
-            colour,
-            mask,
-            copy_source,
-        )
     }
 
     // Updates the data stored with our `BitmapHandle` if this `BitmapData`
@@ -1398,6 +1414,76 @@ impl<'gc> BitmapData<'gc> {
                 tracing::warn!("BitmapData.apply_filter: Renderer not yet implemented")
             }
         }
+    }
+
+    pub fn hit_test_point(&self, alpha_threshold: u32, test_point: (i32, i32)) -> bool {
+        if self.is_point_in_bounds(test_point.0, test_point.1) {
+            self.get_pixel32_raw(test_point.0 as u32, test_point.1 as u32)
+                .alpha() as u32
+                >= alpha_threshold
+        } else {
+            false
+        }
+    }
+
+    pub fn hit_test_rectangle(
+        &self,
+        alpha_threshold: u32,
+        top_left: (i32, i32),
+        size: (i32, i32),
+    ) -> bool {
+        for x in 0..size.0 {
+            for y in 0..size.1 {
+                if self.hit_test_point(alpha_threshold, (top_left.0 + x, top_left.1 + y)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn hit_test_bitmapdata(
+        &self,
+        self_point: (i32, i32),
+        self_threshold: u32,
+        test: Option<&BitmapData>,
+        test_point: (i32, i32),
+        test_threshold: u32,
+    ) -> bool {
+        let xd = test_point.0 - self_point.0;
+        let yd = test_point.1 - self_point.1;
+        let self_width = self.width as i32;
+        let self_height = self.height as i32;
+        let (test_width, test_height) = if let Some(test) = test {
+            (test.width as i32, test.height as i32)
+        } else {
+            (self_width, self_height)
+        };
+        let (self_x0, test_x0, width) = if xd < 0 {
+            (0, -xd, self_width.min(test_width + xd))
+        } else {
+            (xd, 0, test_width.min(self_width - xd))
+        };
+        let (self_y0, test_y0, height) = if yd < 0 {
+            (0, -yd, self_height.min(test_height + yd))
+        } else {
+            (yd, 0, test_height.min(self_height - yd))
+        };
+        for x in 0..width {
+            for y in 0..height {
+                let self_is_opaque =
+                    self.hit_test_point(self_threshold, (self_x0 + x, self_y0 + y));
+                let test_is_opaque = if let Some(test) = test {
+                    test.hit_test_point(test_threshold, (test_x0 + x, test_y0 + y))
+                } else {
+                    self.hit_test_point(test_threshold, (test_x0 + x, test_y0 + y))
+                };
+                if self_is_opaque && test_is_opaque {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1540,6 +1626,48 @@ fn copy_pixels_to_bitmapdata(write: &mut BitmapData, buffer: &[u8], buffer_width
             // Ignore the original color entirely - the blending (including alpha)
             // was done by the renderer when it wrote over the previous texture contents.
             write.set_pixel32_raw(x, y, nc);
+        }
+    }
+    write.set_cpu_dirty(true);
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum ThresholdOperation {
+    Equals,
+    NotEquals,
+    LessThan,
+    LessThanOrEquals,
+    GreaterThan,
+    GreaterThanOrEquals,
+}
+
+impl ThresholdOperation {
+    pub fn from_wstr(str: &WStr) -> Option<Self> {
+        if str == b"==" {
+            Some(Self::Equals)
+        } else if str == b"!=" {
+            Some(Self::NotEquals)
+        } else if str == b"<" {
+            Some(Self::LessThan)
+        } else if str == b"<=" {
+            Some(Self::LessThanOrEquals)
+        } else if str == b">" {
+            Some(Self::GreaterThan)
+        } else if str == b">=" {
+            Some(Self::GreaterThanOrEquals)
+        } else {
+            None
+        }
+    }
+
+    pub fn matches(&self, value: u32, masked_threshold: u32) -> bool {
+        match self {
+            ThresholdOperation::Equals => value == masked_threshold,
+            ThresholdOperation::NotEquals => value != masked_threshold,
+            ThresholdOperation::LessThan => value < masked_threshold,
+            ThresholdOperation::LessThanOrEquals => value <= masked_threshold,
+            ThresholdOperation::GreaterThan => value > masked_threshold,
+            ThresholdOperation::GreaterThanOrEquals => value >= masked_threshold,
         }
     }
 }

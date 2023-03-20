@@ -743,7 +743,13 @@ impl<'gc> MovieClip<'gc> {
             let domain = context.library.library_for_movie_mut(movie).avm2_domain();
 
             // DoAbc tag seems to be equivalent to a DoAbc2 with Lazy flag set
-            if let Err(e) = Avm2::do_abc(context, data, swf::DoAbc2Flag::LAZY_INITIALIZE, domain) {
+            if let Err(e) = Avm2::do_abc(
+                context,
+                data,
+                None,
+                swf::DoAbc2Flag::LAZY_INITIALIZE,
+                domain,
+            ) {
                 tracing::warn!("Error loading ABC file: {}", e);
             }
         }
@@ -767,7 +773,10 @@ impl<'gc> MovieClip<'gc> {
             let movie = self.movie();
             let domain = context.library.library_for_movie_mut(movie).avm2_domain();
 
-            if let Err(e) = Avm2::do_abc(context, do_abc.data, do_abc.flags, domain) {
+            let name = do_abc.name.to_str_lossy(reader.encoding());
+            let name = AvmString::new_utf8(context.gc_context, name);
+
+            if let Err(e) = Avm2::do_abc(context, do_abc.data, Some(name), do_abc.flags, domain) {
                 tracing::warn!("Error loading ABC file: {}", e);
             }
         }
@@ -857,7 +866,7 @@ impl<'gc> MovieClip<'gc> {
                 }
                 Err(e) => tracing::warn!(
                     "Got AVM2 error {} when attempting to assign symbol class {}",
-                    e,
+                    e.detailed_message(&mut activation),
                     class_name
                 ),
             }
@@ -886,21 +895,33 @@ impl<'gc> MovieClip<'gc> {
                 .unwrap_or_else(|| static_data.total_frames + 1);
 
             let label = WString::from_utf8(&label.to_string_lossy(reader.encoding()));
-            static_data.scene_labels.insert(
-                label.clone(),
-                Scene {
-                    name: label,
-                    start,
-                    length: end - start,
-                },
-            );
+            let scene = Scene {
+                name: label.clone(),
+                start,
+                length: end - start,
+            };
+            static_data.scene_labels.push(scene.clone());
+            if let std::collections::hash_map::Entry::Vacant(v) =
+                static_data.scene_labels_map.entry(label.clone())
+            {
+                v.insert(scene);
+            } else {
+                tracing::warn!("Movie clip {}: Duplicated scene label", self.id());
+            }
         }
 
         for FrameLabelData { frame_num, label } in sfl_data.frame_labels {
-            static_data.frame_labels.insert(
-                WString::from_utf8(&label.to_string_lossy(reader.encoding())),
-                frame_num as u16 + 1,
-            );
+            let label = WString::from_utf8(&label.to_string_lossy(reader.encoding()));
+            static_data
+                .frame_labels
+                .push((frame_num as u16 + 1, label.clone()));
+            if let std::collections::hash_map::Entry::Vacant(v) =
+                static_data.frame_labels_map.entry(label)
+            {
+                v.insert(frame_num as u16 + 1);
+            } else {
+                tracing::warn!("Movie clip {}: Duplicated frame label", self.id());
+            }
         }
 
         Ok(())
@@ -1099,14 +1120,7 @@ impl<'gc> MovieClip<'gc> {
     ///
     /// Scenes will be sorted in playback order.
     pub fn scenes(self) -> Vec<Scene> {
-        let mut out: Vec<_> = self
-            .0
-            .read()
-            .static_data
-            .scene_labels
-            .values()
-            .cloned()
-            .collect();
+        let mut out: Vec<_> = self.0.read().static_data.scene_labels.clone();
         out.sort_unstable_by(|Scene { start: a, .. }, Scene { start: b, .. }| a.cmp(b));
         out
     }
@@ -1120,7 +1134,7 @@ impl<'gc> MovieClip<'gc> {
         let read = self.0.read();
         let mut best: Option<&Scene> = None;
 
-        for (_, scene) in read.static_data.scene_labels.iter() {
+        for scene in read.static_data.scene_labels.iter() {
             if cond(best, scene) {
                 best = Some(scene);
             }
@@ -1135,7 +1149,7 @@ impl<'gc> MovieClip<'gc> {
         let current_frame = read.current_frame();
         let mut best: Option<(&WString, FrameNumber)> = None;
 
-        for (label, frame) in read.static_data.frame_labels.iter() {
+        for (frame, label) in read.static_data.frame_labels.iter() {
             if *frame > current_frame {
                 continue;
             }
@@ -1162,8 +1176,8 @@ impl<'gc> MovieClip<'gc> {
             .static_data
             .frame_labels
             .iter()
-            .filter(|(_label, frame)| **frame >= from && **frame < to)
-            .map(|(label, frame)| (label.clone(), *frame))
+            .filter(|(frame, _label)| *frame >= from && *frame < to)
+            .map(|(frame, label)| (label.clone(), *frame))
             .collect();
 
         values.sort_unstable_by(|(_, framea), (_, frameb)| framea.cmp(frameb));
@@ -1260,12 +1274,17 @@ impl<'gc> MovieClip<'gc> {
             self.0
                 .read()
                 .static_data
-                .frame_labels
+                .frame_labels_map
                 .get(frame_label)
                 .copied()
         } else {
             let label = frame_label.to_ascii_lowercase();
-            self.0.read().static_data.frame_labels.get(&label).copied()
+            self.0
+                .read()
+                .static_data
+                .frame_labels_map
+                .get(&label)
+                .copied()
         }
     }
 
@@ -1274,7 +1293,7 @@ impl<'gc> MovieClip<'gc> {
         self.0
             .read()
             .static_data
-            .scene_labels
+            .scene_labels_map
             .get(&WString::from(scene_label))
             .map(|Scene { start, .. }| start)
             .copied()
@@ -1298,13 +1317,10 @@ impl<'gc> MovieClip<'gc> {
 
         if scene <= frame {
             let mut end = self.total_frames();
-            for (
-                _label,
-                Scene {
-                    start: new_scene_start,
-                    ..
-                },
-            ) in self.0.read().static_data.scene_labels.iter()
+            for Scene {
+                start: new_scene_start,
+                ..
+            } in self.0.read().static_data.scene_labels.iter()
             {
                 if *new_scene_start < end && *new_scene_start > scene {
                     end = *new_scene_start;
@@ -1677,6 +1693,8 @@ impl<'gc> MovieClip<'gc> {
         }
 
         let frame_before_rewind = self.current_frame();
+        self.base_mut(context.gc_context)
+            .set_skip_next_enter_frame(false);
 
         // Flash gotos are tricky:
         // 1) Conceptually, a goto should act like the playhead is advancing forward or
@@ -2237,26 +2255,6 @@ impl<'gc> MovieClip<'gc> {
         RefMut::map(self.0.write(gc_context), |s| &mut s.drawing)
     }
 
-    /// If `true`, this clip was instantiated by Avm2Button
-    /// from an SWF tag. Currently, this flag
-    /// is used to opt out of orphan handling in `avm2::valid_orphan`
-    pub fn is_button_state(&self) -> bool {
-        self.0
-            .read()
-            .flags
-            .intersects(MovieClipFlags::IS_BUTTON_STATE)
-    }
-
-    /// Permanently marks this clip as being used as one of the four
-    /// `ButtonState`s for an `Avm2Button`. This should only be called
-    /// within `avm2_button`
-    pub fn set_is_button_state(&self, gc_context: MutationContext<'gc, '_>) {
-        self.0
-            .write(gc_context)
-            .flags
-            .set(MovieClipFlags::IS_BUTTON_STATE, true)
-    }
-
     pub fn is_button_mode(&self, context: &mut UpdateContext<'_, 'gc>) -> bool {
         if self.forced_button_mode()
             || self
@@ -2267,16 +2265,20 @@ impl<'gc> MovieClip<'gc> {
         {
             true
         } else {
-            let mut activation = Avm1Activation::from_stub(
-                context.reborrow(),
-                ActivationIdentifier::root("[Mouse Pick]"),
-            );
-            let object = self.object().coerce_to_object(&mut activation);
+            let object = self.object();
+            if let Avm1Value::Object(object) = object {
+                let mut activation = Avm1Activation::from_stub(
+                    context.reborrow(),
+                    ActivationIdentifier::root("[Mouse Pick]"),
+                );
 
-            ClipEvent::BUTTON_EVENT_METHODS
-                .iter()
-                .copied()
-                .any(|handler| object.has_property(&mut activation, handler.into()))
+                ClipEvent::BUTTON_EVENT_METHODS
+                    .iter()
+                    .copied()
+                    .any(|handler| object.has_property(&mut activation, handler.into()))
+            } else {
+                false
+            }
         }
     }
 
@@ -2351,9 +2353,31 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     }
 
     fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+        let skip_frame = self.base().should_skip_next_enter_frame();
         //Child removals from looping gotos appear to resolve in reverse order.
         for child in self.iter_render_list().rev() {
+            if skip_frame {
+                // If we're skipping our current frame, then we want to skip it for our children
+                // as well. This counts as the skipped frame for any children that already
+                // has this set to true (e.g. a third-level grandchild doesn't skip three frames).
+                // We'll still call 'enter_frame' on the child - it will recurse, propagating along
+                // the flag, and then set its own flag back to 'false'.
+                //
+                // We do *not* propagate `skip_frame=false` down to children, since a normally
+                // executing parent can add a child that should have its first frame skipped.
+
+                // FIXME - does this propagate through non-movie-clip children (Loader/Button)?
+                child
+                    .base_mut(context.gc_context)
+                    .set_skip_next_enter_frame(true);
+            }
             child.enter_frame(context);
+        }
+
+        if skip_frame {
+            self.base_mut(context.gc_context)
+                .set_skip_next_enter_frame(false);
+            return;
         }
 
         if context.is_action_script_3() {
@@ -2638,7 +2662,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     fn set_object2(&self, context: &mut UpdateContext<'_, 'gc>, to: Avm2Object<'gc>) {
         self.0.write(context.gc_context).object = Some(to.into());
         if self.parent().is_none() {
-            context.avm2.add_orphan_movie(*self);
+            context.avm2.add_orphan_obj((*self).into());
         }
     }
 
@@ -2649,7 +2673,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         let has_parent = self.parent().is_some();
 
         if context.is_action_script_3() && had_parent && !has_parent {
-            context.avm2.add_orphan_movie(*self)
+            context.avm2.add_orphan_obj((*self).into())
         }
     }
 
@@ -3784,6 +3808,11 @@ impl<'gc, 'a> MovieClipData<'gc> {
         static_data: &mut MovieClipStatic<'gc>,
         context: &UpdateContext<'_, 'gc>,
     ) -> Result<(), Error> {
+        // This tag is ignored if scene labels exist.
+        if !static_data.scene_labels.is_empty() {
+            return Ok(());
+        }
+
         let frame_label = reader.read_frame_label()?;
         let mut label = frame_label
             .label
@@ -3795,7 +3824,9 @@ impl<'gc, 'a> MovieClipData<'gc> {
             label.make_ascii_lowercase();
         }
         let label = WString::from_utf8_owned(label);
-        if let std::collections::hash_map::Entry::Vacant(v) = static_data.frame_labels.entry(label)
+        static_data.frame_labels.push((cur_frame, label.clone()));
+        if let std::collections::hash_map::Entry::Vacant(v) =
+            static_data.frame_labels_map.entry(label)
         {
             v.insert(cur_frame);
         } else {
@@ -4107,7 +4138,7 @@ impl Default for Scene {
     fn default() -> Self {
         Scene {
             name: WString::default(),
-            start: 0,
+            start: 1,
             length: u16::MAX,
         }
     }
@@ -4149,9 +4180,13 @@ struct MovieClipStatic<'gc> {
     id: CharacterId,
     swf: SwfSlice,
     #[collect(require_static)]
-    frame_labels: HashMap<WString, FrameNumber>,
+    frame_labels: Vec<(FrameNumber, WString)>,
     #[collect(require_static)]
-    scene_labels: HashMap<WString, Scene>,
+    frame_labels_map: HashMap<WString, FrameNumber>,
+    #[collect(require_static)]
+    scene_labels: Vec<Scene>,
+    #[collect(require_static)]
+    scene_labels_map: HashMap<WString, Scene>,
     #[collect(require_static)]
     audio_stream_info: Option<swf::SoundStreamHead>,
     #[collect(require_static)]
@@ -4193,8 +4228,10 @@ impl<'gc> MovieClipStatic<'gc> {
             id,
             swf,
             total_frames,
-            frame_labels: HashMap::new(),
-            scene_labels: HashMap::new(),
+            frame_labels: Vec::new(),
+            frame_labels_map: HashMap::new(),
+            scene_labels: Vec::new(),
+            scene_labels_map: HashMap::new(),
             audio_stream_info: None,
             audio_stream_handle: None,
             exported_name: GcCell::allocate(gc_context, None),
@@ -4409,7 +4446,7 @@ pub enum QueuedTagAction {
 
 bitflags! {
     /// Boolean state flags used by `MovieClip`.
-    #[derive(Collect)]
+    #[derive(Clone, Copy, Collect)]
     #[collect(require_static)]
     struct MovieClipFlags: u8 {
         /// Whether this `MovieClip` has run its initial frame.
@@ -4434,8 +4471,6 @@ bitflags! {
         /// Because AVM2 queues PlaceObject tags to run later, explicit gotos
         /// that happen while those tags run should cancel the loop.
         const LOOP_QUEUED = 1 << 4;
-
-        const IS_BUTTON_STATE = 1 << 5;
     }
 }
 

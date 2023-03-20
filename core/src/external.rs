@@ -257,26 +257,26 @@ impl<'gc> Callback<'gc> {
     ) -> Value {
         match self {
             Callback::Avm1 { this, method } => {
-                let base_clip = context.stage.root_clip();
-                let mut activation = Avm1Activation::from_nothing(
-                    context.reborrow(),
-                    Avm1ActivationIdentifier::root("[ExternalInterface]"),
-                    base_clip,
-                );
-                let this = this.coerce_to_object(&mut activation);
-                let args: Vec<Avm1Value> = args
-                    .into_iter()
-                    .map(|v| v.into_avm1(&mut activation))
-                    .collect();
-                let name = AvmString::new_utf8(activation.context.gc_context, name);
-                if let Ok(result) = method
-                    .call(name, &mut activation, this.into(), &args)
-                    .and_then(|value| Value::from_avm1(&mut activation, value))
-                {
-                    result
-                } else {
-                    Value::Null
+                if let Some(base_clip) = context.stage.root_clip() {
+                    let mut activation = Avm1Activation::from_nothing(
+                        context.reborrow(),
+                        Avm1ActivationIdentifier::root("[ExternalInterface]"),
+                        base_clip,
+                    );
+                    let this = this.coerce_to_object(&mut activation);
+                    let args: Vec<Avm1Value> = args
+                        .into_iter()
+                        .map(|v| v.into_avm1(&mut activation))
+                        .collect();
+                    let name = AvmString::new_utf8(activation.context.gc_context, name);
+                    if let Ok(result) = method
+                        .call(name, &mut activation, this.into(), &args)
+                        .and_then(|value| Value::from_avm1(&mut activation, value))
+                    {
+                        return result;
+                    }
                 }
+                Value::Null
             }
             Callback::Avm2 { method } => {
                 let mut activation = Avm2Activation::from_nothing(context.reborrow());
@@ -284,10 +284,15 @@ impl<'gc> Callback<'gc> {
                     .into_iter()
                     .map(|v| v.into_avm2(&mut activation))
                     .collect();
-                if let Ok(result) = method.call(None, &args, &mut activation) {
-                    Value::from_avm2(result)
-                } else {
-                    Value::Null
+                match method.call(None, &args, &mut activation) {
+                    Ok(result) => Value::from_avm2(result),
+                    Err(e) => {
+                        tracing::error!(
+                            "Unhandled error in External Interface callback {name}: {}",
+                            e.detailed_message(&mut activation)
+                        );
+                        Value::Null
+                    }
                 }
             }
         }

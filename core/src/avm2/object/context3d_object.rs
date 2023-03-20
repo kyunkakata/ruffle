@@ -5,7 +5,7 @@ use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::bitmap::bitmap_data::BitmapData;
+use crate::avm2_stub_method;
 use crate::context::RenderContext;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_render::backend::{
@@ -13,9 +13,8 @@ use ruffle_render::backend::{
     Context3DTextureFormat, Context3DTriangleFace, Context3DVertexBufferFormat, ProgramType,
     Texture,
 };
-use ruffle_render::bitmap::{Bitmap, BitmapFormat};
+use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::commands::CommandHandler;
-use ruffle_render::transform::Transform;
 use std::cell::{Ref, RefMut};
 use std::rc::Rc;
 
@@ -105,6 +104,7 @@ impl<'gc> Context3DObject<'gc> {
         class: ClassObject<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
+        check_texture_stub(activation, format);
         let texture = self
             .0
             .write(activation.context.gc_context)
@@ -142,7 +142,7 @@ impl<'gc> Context3DObject<'gc> {
             activation,
             *self,
             handle,
-            data_32_per_vertex as usize,
+            data_32_per_vertex,
         )?))
     }
 
@@ -151,7 +151,7 @@ impl<'gc> Context3DObject<'gc> {
         buffer: VertexBuffer3DObject<'gc>,
         data: Vec<u8>,
         start_vertex: usize,
-        data_per_vertex: usize,
+        data32_per_vertex: u8,
         activation: &mut Activation<'_, 'gc>,
     ) {
         self.0.write(activation.context.gc_context).commands.push(
@@ -159,7 +159,7 @@ impl<'gc> Context3DObject<'gc> {
                 buffer: buffer.handle(),
                 data,
                 start_vertex,
-                data_per_vertex,
+                data32_per_vertex,
             },
         );
     }
@@ -292,6 +292,31 @@ impl<'gc> Context3DObject<'gc> {
         );
     }
 
+    pub fn set_render_to_texture(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        texture: Rc<dyn Texture>,
+        enable_depth_and_stencil: bool,
+        anti_alias: u32,
+        surface_selector: u32,
+    ) {
+        self.0.write(activation.context.gc_context).commands.push(
+            Context3DCommand::SetRenderToTexture {
+                texture,
+                enable_depth_and_stencil,
+                anti_alias,
+                surface_selector,
+            },
+        );
+    }
+
+    pub fn set_render_to_back_buffer(&self, activation: &mut Activation<'_, 'gc>) {
+        self.0
+            .write(activation.context.gc_context)
+            .commands
+            .push(Context3DCommand::SetRenderToBackBuffer);
+    }
+
     pub fn present(&self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         let mut write = self.0.write(activation.context.gc_context);
         let commands = std::mem::take(&mut write.commands);
@@ -317,7 +342,7 @@ impl<'gc> Context3DObject<'gc> {
             context.commands.render_stage3d(
                 handle,
                 // FIXME - apply x and y translation from Stage3D
-                Transform::default(),
+                context.transform_stack.transform(),
             );
         }
     }
@@ -350,21 +375,14 @@ impl<'gc> Context3DObject<'gc> {
 
     pub(crate) fn copy_bitmap_to_texture(
         &self,
-        activation: &mut Activation<'_, 'gc>,
-        source: GcCell<'gc, BitmapData>,
+        source: BitmapHandle,
         dest: Rc<dyn Texture>,
         layer: u32,
+        activation: &mut Activation<'_, 'gc>,
     ) {
-        let bitmap = source.read();
-
         self.0.write(activation.context.gc_context).commands.push(
             Context3DCommand::CopyBitmapToTexture {
-                source: Bitmap::new(
-                    bitmap.width(),
-                    bitmap.height(),
-                    BitmapFormat::Rgba,
-                    bitmap.pixels_rgba(),
-                ),
+                source,
                 dest,
                 layer,
             },
@@ -411,6 +429,7 @@ impl<'gc> Context3DObject<'gc> {
         streaming_levels: u32,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
+        check_texture_stub(activation, format);
         let texture = self
             .0
             .write(activation.context.gc_context)
@@ -422,7 +441,7 @@ impl<'gc> Context3DObject<'gc> {
                 format,
                 optimize_for_render_to_texture,
                 streaming_levels,
-            );
+            )?;
 
         let class = activation.avm2().classes().cubetexture;
 
@@ -469,5 +488,29 @@ impl<'gc> TObject<'gc> for Context3DObject<'gc> {
 impl std::fmt::Debug for Context3DObject<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Context3D")
+    }
+}
+
+// This would ideally be placed closer to the actual usage, but
+// we don't have stub support in 'render' crates
+fn check_texture_stub(activation: &mut Activation<'_, '_>, format: Context3DTextureFormat) {
+    match format {
+        Context3DTextureFormat::BgrPacked => {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "createTexture",
+                "with BgrPacked"
+            );
+        }
+        Context3DTextureFormat::Compressed => {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "createTexture",
+                "with Compressed"
+            );
+        }
+        _ => {}
     }
 }

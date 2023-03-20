@@ -54,6 +54,8 @@ pub use stage::{Stage, StageAlign, StageDisplayState, StageScaleMode, WindowMode
 pub use text::Text;
 pub use video::Video;
 
+use self::loader_display::LoaderDisplayWeak;
+
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct DisplayObjectBase<'gc> {
@@ -388,6 +390,16 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     fn avm1_removed(&self) -> bool {
         self.flags.contains(DisplayObjectFlags::AVM1_REMOVED)
+    }
+
+    pub fn should_skip_next_enter_frame(&self) -> bool {
+        self.flags
+            .contains(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME)
+    }
+
+    pub fn set_skip_next_enter_frame(&mut self, skip: bool) {
+        self.flags
+            .set(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
     }
 
     fn set_avm1_removed(&mut self, value: bool) {
@@ -751,12 +763,8 @@ pub trait TDisplayObject<'gc>:
         let mut node = self.parent();
         let mut matrix = *self.base().matrix();
         while let Some(display_object) = node {
-            // TODO: We don't want to include the stage transform because it includes the scale
-            // mode and alignment transform, but the AS APIs expect "global" to be relative to the
-            // Stage, not final view coordinates.
-            // I suspect we want this to include the stage transform eventually.
-            // NOTE: If we do, make sure to remove the override of this
-            // function on `Stage`.
+            // We want to transform to Stage-local coordinates,
+            // so do *not* apply the Stage's matrix
             if display_object.as_stage().is_some() {
                 break;
             }
@@ -1346,7 +1354,9 @@ pub trait TDisplayObject<'gc>:
             // Children added to buttons by the timeline do not emit events.
             if self.parent().and_then(|p| p.as_avm2_button()).is_none() {
                 dispatch_added_event_only((*self).into(), context);
-                dispatch_added_to_stage_event_only((*self).into(), context);
+                if self.avm2_stage(context).is_some() {
+                    dispatch_added_to_stage_event_only((*self).into(), context);
+                }
             }
 
             //TODO: Don't report missing property errors.
@@ -1774,12 +1784,20 @@ impl<'gc> DisplayObject<'gc> {
     pub fn option_ptr_eq(a: Option<DisplayObject<'gc>>, b: Option<DisplayObject<'gc>>) -> bool {
         a.map(|o| o.as_ptr()) == b.map(|o| o.as_ptr())
     }
+
+    pub fn downgrade(self) -> DisplayObjectWeak<'gc> {
+        match self {
+            DisplayObject::MovieClip(mc) => DisplayObjectWeak::MovieClip(mc.downgrade()),
+            DisplayObject::LoaderDisplay(l) => DisplayObjectWeak::LoaderDisplay(l.downgrade()),
+            _ => panic!("Downgrade not yet implemented for {:?}", self),
+        }
+    }
 }
 
 bitflags! {
     /// Bit flags used by `DisplayObject`.
-    #[derive(Collect)]
-    #[collect(no_drop)]
+    #[derive(Clone, Collect, Copy)]
+    #[collect(require_static)]
     struct DisplayObjectFlags: u16 {
         /// Whether this object has been removed from the display list.
         /// Necessary in AVM1 to throw away queued actions from removed movie clips.
@@ -1819,12 +1837,20 @@ bitflags! {
 
         /// Whether this object has an explicit name.
         const HAS_EXPLICIT_NAME        = 1 << 10;
+
+        /// Flag set when we should skip running our next 'enterFrame'
+        /// for ourself and our children.
+        /// This is set for objects constructed from ActionScript,
+        /// which are observed to lag behind objects placed by the timeline
+        /// (even if they are both placed in the same frame)
+        const SKIP_NEXT_ENTER_FRAME          = 1 << 11;
     }
 }
 
 bitflags! {
     /// Defines how hit testing should be performed.
     /// Used for mouse picking and ActionScript's hitTestClip functions.
+    #[derive(Clone, Copy)]
     pub struct HitTestOptions: u8 {
         /// Ignore objects used as masks (setMask / clipDepth).
         const SKIP_MASK = 1 << 0;
@@ -1833,10 +1859,10 @@ bitflags! {
         const SKIP_INVISIBLE = 1 << 1;
 
         /// The options used for `hitTest` calls in ActionScript.
-        const AVM_HIT_TEST = Self::SKIP_MASK.bits;
+        const AVM_HIT_TEST = Self::SKIP_MASK.bits();
 
         /// The options used for mouse picking, such as clicking on buttons.
-        const MOUSE_PICK = Self::SKIP_MASK.bits | Self::SKIP_INVISIBLE.bits;
+        const MOUSE_PICK = Self::SKIP_MASK.bits() | Self::SKIP_INVISIBLE.bits();
     }
 }
 
@@ -1984,6 +2010,33 @@ impl Default for SoundTransform {
             left_to_right: 0,
             right_to_left: 0,
             right_to_right: 100,
+        }
+    }
+}
+
+/// A version of `DisplayObject` that holds weak pointers.
+/// Currently, this is only used by orphan handling, so we only
+/// need two variants. If other use cases arise, feel free
+/// to add more variants.
+#[derive(Copy, Clone, Collect)]
+#[collect(no_drop)]
+pub enum DisplayObjectWeak<'gc> {
+    MovieClip(MovieClipWeak<'gc>),
+    LoaderDisplay(LoaderDisplayWeak<'gc>),
+}
+
+impl<'gc> DisplayObjectWeak<'gc> {
+    pub fn as_ptr(&self) -> *const DisplayObjectPtr {
+        match self {
+            DisplayObjectWeak::MovieClip(mc) => mc.as_ptr(),
+            DisplayObjectWeak::LoaderDisplay(ld) => ld.as_ptr(),
+        }
+    }
+
+    pub fn upgrade(&self, mc: MutationContext<'gc, '_>) -> Option<DisplayObject<'gc>> {
+        match self {
+            DisplayObjectWeak::MovieClip(movie) => movie.upgrade(mc).map(|m| m.into()),
+            DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
         }
     }
 }

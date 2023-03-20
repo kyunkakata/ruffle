@@ -104,7 +104,7 @@ impl_downcast!(ShaderModule);
 pub trait Texture: Downcast + Collect {}
 impl_downcast!(Texture);
 
-#[derive(Collect, Debug)]
+#[derive(Collect, Debug, Copy, Clone)]
 #[collect(require_static)]
 pub enum Context3DTextureFormat {
     Bgra,
@@ -113,6 +113,26 @@ pub enum Context3DTextureFormat {
     Compressed,
     CompressedAlpha,
     RgbaHalfFloat,
+}
+
+impl Context3DTextureFormat {
+    pub fn from_wstr(wstr: &WStr) -> Option<Context3DTextureFormat> {
+        if wstr == b"bgra" {
+            Some(Context3DTextureFormat::Bgra)
+        } else if wstr == b"bgraPacked4444" {
+            Some(Context3DTextureFormat::BgraPacked)
+        } else if wstr == b"bgrPacked565" {
+            Some(Context3DTextureFormat::BgrPacked)
+        } else if wstr == b"compressed" {
+            Some(Context3DTextureFormat::Compressed)
+        } else if wstr == b"compressedAlpha" {
+            Some(Context3DTextureFormat::CompressedAlpha)
+        } else if wstr == b"rgbaHalfFloat" {
+            Some(Context3DTextureFormat::RgbaHalfFloat)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Collect, Debug, Copy, Clone)]
@@ -209,7 +229,7 @@ pub trait Context3D: Collect + Downcast {
         format: Context3DTextureFormat,
         optimize_for_render_to_texture: bool,
         streaming_levels: u32,
-    ) -> Rc<dyn Texture>;
+    ) -> Result<Rc<dyn Texture>, Error>;
 }
 impl_downcast!(Context3D);
 
@@ -289,6 +309,13 @@ pub enum Context3DCommand<'gc> {
         wants_best_resolution: bool,
         wants_best_resolution_on_browser_zoom: bool,
     },
+    SetRenderToTexture {
+        texture: Rc<dyn Texture>,
+        enable_depth_and_stencil: bool,
+        anti_alias: u32,
+        surface_selector: u32,
+    },
+    SetRenderToBackBuffer,
 
     UploadToIndexBuffer {
         buffer: Rc<dyn IndexBuffer>,
@@ -299,7 +326,7 @@ pub enum Context3DCommand<'gc> {
     UploadToVertexBuffer {
         buffer: Rc<dyn VertexBuffer>,
         start_vertex: usize,
-        data_per_vertex: usize,
+        data32_per_vertex: u8,
         data: Vec<u8>,
     },
 
@@ -336,7 +363,7 @@ pub enum Context3DCommand<'gc> {
         face: Context3DTriangleFace,
     },
     CopyBitmapToTexture {
-        source: crate::bitmap::Bitmap,
+        source: BitmapHandle,
         dest: Rc<dyn Texture>,
         layer: u32,
     },

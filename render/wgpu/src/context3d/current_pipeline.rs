@@ -1,5 +1,5 @@
 use naga::valid::{Capabilities, ValidationFlags, Validator};
-use ruffle_render::backend::{Context3DTriangleFace, Context3DVertexBufferFormat};
+use ruffle_render::backend::{Context3DTriangleFace, Context3DVertexBufferFormat, Texture};
 
 use wgpu::{
     BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, FrontFace, SamplerBindingType,
@@ -73,6 +73,10 @@ pub struct CurrentPipeline {
 }
 
 pub struct BoundTextureData {
+    /// This is used to allow us to remove a bound texture when
+    /// it's used with `setRenderToTexture`. The actual shader binding
+    /// uses `view`
+    pub id: Rc<dyn Texture>,
     pub view: TextureView,
     pub cube: bool,
 }
@@ -134,6 +138,20 @@ impl CurrentPipeline {
         // FIXME - determine if the texture actually changed
         self.dirty.set(true);
         self.bound_textures[index] = texture;
+    }
+
+    pub fn remove_texture(&mut self, texture: &Rc<dyn Texture>) {
+        for i in 0..self.bound_textures.len() {
+            if let Some(bound_texture) = &self.bound_textures[i] {
+                // Ignore the vtable pointer
+                if std::ptr::eq(
+                    Rc::as_ptr(&bound_texture.id) as *const (),
+                    Rc::as_ptr(texture) as *const (),
+                ) {
+                    self.update_texture_at(i, None);
+                }
+            }
+        }
     }
 
     pub fn update_vertex_buffer_at(&mut self, _index: usize) {
@@ -389,7 +407,10 @@ impl CurrentPipeline {
                     Context3DVertexBufferFormat::Float1 => {
                         (wgpu::VertexFormat::Float32, std::mem::size_of::<f32>())
                     }
-                    Context3DVertexBufferFormat::Bytes4 => (wgpu::VertexFormat::Uint8x4, 4),
+                    // AGAL shaders always work with floating-point values, so
+                    // we use Unorm8x4 to convert the bytes to floats in the range
+                    // [0, 1].
+                    Context3DVertexBufferFormat::Bytes4 => (wgpu::VertexFormat::Unorm8x4, 4),
                 };
 
                 let buffer_data = index_per_buffer

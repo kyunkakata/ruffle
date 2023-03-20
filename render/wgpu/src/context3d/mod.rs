@@ -3,20 +3,20 @@ use ruffle_render::backend::{
     Context3DTextureFormat, Context3DVertexBufferFormat, IndexBuffer, ProgramType, ShaderModule,
     VertexBuffer,
 };
-use ruffle_render::bitmap::{BitmapFormat, BitmapHandle};
+use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::error::Error;
 use std::cell::Cell;
 
 use wgpu::util::StagingBelt;
 use wgpu::{
-    BindGroup, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages,
+    BindGroup, BufferDescriptor, BufferUsages, ImageCopyTexture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, COPY_BUFFER_ALIGNMENT,
 };
 use wgpu::{CommandEncoder, Extent3d, RenderPass};
 
 use crate::context3d::current_pipeline::{BoundTextureData, AGAL_FLOATS_PER_REGISTER};
 use crate::descriptors::Descriptors;
-use crate::Texture;
+use crate::{as_texture, Texture};
 use gc_arena::{Collect, MutationContext};
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -56,8 +56,11 @@ pub struct WgpuContext3D {
 
     buffer_staging_belt: StagingBelt,
 
-    texture_view: Option<wgpu::TextureView>,
-    depth_texture_view: Option<wgpu::TextureView>,
+    current_texture_view: Option<Rc<wgpu::TextureView>>,
+    current_depth_texture_view: Option<Rc<wgpu::TextureView>>,
+
+    back_buffer_texture_view: Option<Rc<wgpu::TextureView>>,
+    back_buffer_depth_texture_view: Option<Rc<wgpu::TextureView>>,
 
     // Note - the Context3D docs state that rendering should be double-buffered.
     // However, our Context3DCommand list already acts like a second buffer -
@@ -81,21 +84,58 @@ impl WgpuContext3D {
         Self {
             descriptors,
             buffer_staging_belt,
-            texture_view: None,
             raw_texture_handle,
             current_pipeline,
             compiled_pipeline: None,
             bind_group: None,
             vertex_attributes: std::array::from_fn(|_| None),
-            depth_texture_view: None,
+
+            current_texture_view: None,
+            current_depth_texture_view: None,
+
+            back_buffer_texture_view: None,
+            back_buffer_depth_texture_view: None,
         }
     }
+
+    fn create_depth_texture(&mut self, width: u32, height: u32) {
+        let depth_texture = self
+            .descriptors
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("Context3D depth texture"),
+                size: Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                view_formats: &[wgpu::TextureFormat::Depth24PlusStencil8],
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            });
+        self.current_depth_texture_view =
+            Some(Rc::new(depth_texture.create_view(&Default::default())));
+    }
+
+    // This restores rendering to our normal buffer. It can be triggered explicitly
+    // from ActionScript via Context3D.setRenderToBackBuffer(), or automatically
+    // when calling Context3D.present()
+    fn set_render_to_back_buffer(&mut self) {
+        self.current_texture_view = self.back_buffer_texture_view.clone();
+        self.current_depth_texture_view = self.back_buffer_depth_texture_view.clone();
+    }
+
     // Executes all of the given `commands` in response to a `Context3D.present` call.
     pub(crate) fn present<'gc>(
         &mut self,
         commands: Vec<Context3DCommand<'gc>>,
         mc: MutationContext<'gc, '_>,
     ) {
+        self.set_render_to_back_buffer();
+
         let mut render_command_encoder =
             self.descriptors
                 .device
@@ -135,19 +175,21 @@ impl WgpuContext3D {
                     green,
                     blue,
                     alpha,
-                    depth: _,
-                    stencil: _,
+                    depth,
+                    stencil,
                     mask,
                 } => {
-                    clear_color = Some((
-                        wgpu::Color {
+                    clear_color = Some(ClearColor {
+                        rgb: wgpu::Color {
                             r: *red,
                             g: *green,
                             b: *blue,
                             a: *alpha,
                         },
-                        *mask,
-                    ));
+                        mask: *mask,
+                        depth: *depth as f32,
+                        stencil: *stencil,
+                    });
                     seen_clear_command = true;
 
                     // Finish the current render pass - our next DrawTriangles command will create
@@ -157,19 +199,13 @@ impl WgpuContext3D {
                 Context3DCommand::ConfigureBackBuffer {
                     width,
                     height,
-                    anti_alias,
+                    anti_alias: _,
                     depth_and_stencil,
                     wants_best_resolution: _,
                     wants_best_resolution_on_browser_zoom: _,
                 } => {
                     let texture_label = create_debug_label!("Render target texture");
                     let format = wgpu::TextureFormat::Rgba8Unorm;
-
-                    if *anti_alias != 1 {
-                        tracing::warn!(
-                            "Context3D::present: Anti-aliasing leve {anti_alias} not implemented"
-                        );
-                    }
 
                     let wgpu_texture =
                         self.descriptors
@@ -192,29 +228,16 @@ impl WgpuContext3D {
                             });
 
                     finish_render_pass!(render_pass);
-                    self.texture_view = Some(wgpu_texture.create_view(&Default::default()));
+                    self.current_texture_view =
+                        Some(Rc::new(wgpu_texture.create_view(&Default::default())));
 
                     if *depth_and_stencil {
-                        let depth_texture =
-                            self.descriptors
-                                .device
-                                .create_texture(&wgpu::TextureDescriptor {
-                                    label: Some("Context3D depth texture"),
-                                    size: Extent3d {
-                                        width: *width,
-                                        height: *height,
-                                        depth_or_array_layers: 1,
-                                    },
-                                    mip_level_count: 1,
-                                    sample_count: 1,
-                                    dimension: TextureDimension::D2,
-                                    format: wgpu::TextureFormat::Depth24PlusStencil8,
-                                    view_formats: &[wgpu::TextureFormat::Depth24PlusStencil8],
-                                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                                });
-                        self.depth_texture_view =
-                            Some(depth_texture.create_view(&Default::default()));
+                        self.create_depth_texture(*width, *height);
                     }
+
+                    self.back_buffer_texture_view = self.current_texture_view.clone();
+                    self.back_buffer_depth_texture_view = self.current_depth_texture_view.clone();
+
                     self.current_pipeline
                         .update_has_depth_texture(*depth_and_stencil);
 
@@ -252,7 +275,7 @@ impl WgpuContext3D {
                 Context3DCommand::UploadToVertexBuffer {
                     buffer,
                     start_vertex,
-                    data_per_vertex,
+                    data32_per_vertex,
                     data,
                 } => {
                     let buffer: Rc<VertexBufferWrapper> = buffer
@@ -261,15 +284,52 @@ impl WgpuContext3D {
                         .downcast::<VertexBufferWrapper>()
                         .unwrap();
 
-                    self.buffer_staging_belt
-                        .write_buffer(
-                            &mut buffer_command_encoder,
-                            &buffer.buffer,
-                            (*start_vertex * *data_per_vertex * std::mem::size_of::<f32>()) as u64,
-                            NonZeroU64::new(data.len() as u64).unwrap(),
-                            &self.descriptors.device,
-                        )
+                    let align = COPY_BUFFER_ALIGNMENT as usize;
+                    let rounded_size = (data.len() + align - 1) & !(align - 1);
+
+                    self.buffer_staging_belt.write_buffer(
+                        &mut buffer_command_encoder,
+                        &buffer.buffer,
+                        (*start_vertex * (*data32_per_vertex as usize) * std::mem::size_of::<f32>())
+                            as u64,
+                        NonZeroU64::new(rounded_size as u64).unwrap(),
+                        &self.descriptors.device,
+                    )[..data.len()]
                         .copy_from_slice(data);
+                }
+
+                Context3DCommand::SetRenderToTexture {
+                    texture,
+                    enable_depth_and_stencil,
+                    anti_alias: _,
+                    surface_selector: _,
+                } => {
+                    finish_render_pass!(render_pass);
+
+                    let texture_wrapper =
+                        texture.as_any().downcast_ref::<TextureWrapper>().unwrap();
+
+                    if *enable_depth_and_stencil {
+                        self.current_texture_view = Some(Rc::new(
+                            texture_wrapper.texture.create_view(&Default::default()),
+                        ));
+                    } else {
+                        self.current_depth_texture_view = None;
+                    }
+
+                    self.create_depth_texture(
+                        texture_wrapper.texture.width(),
+                        texture_wrapper.texture.height(),
+                    );
+                    self.current_texture_view = self.current_texture_view.clone();
+                    self.current_depth_texture_view = self.current_depth_texture_view.clone();
+                    self.current_pipeline.remove_texture(texture);
+                }
+
+                Context3DCommand::SetRenderToBackBuffer => {
+                    finish_render_pass!(render_pass);
+
+                    self.set_render_to_back_buffer();
                 }
 
                 Context3DCommand::DrawTriangles {
@@ -329,7 +389,7 @@ impl WgpuContext3D {
                     }
 
                     *render_pass = Some(make_render_pass(
-                        self.texture_view.as_ref().unwrap(),
+                        self.current_texture_view.as_ref().unwrap(),
                         &mut render_command_encoder,
                         compiled_bind_group.as_ref().unwrap(),
                         &self.vertex_attributes,
@@ -337,7 +397,7 @@ impl WgpuContext3D {
                         // will use a clear color of None. This ensures that by itself,
                         // re-creating the render pass has no effect on the output
                         clear_color.take(),
-                        self.depth_texture_view.as_ref(),
+                        self.current_depth_texture_view.as_deref(),
                     ));
 
                     let render_pass_mut = render_pass.as_mut().unwrap();
@@ -469,55 +529,23 @@ impl WgpuContext3D {
                     dest,
                     layer,
                 } => {
-                    // FIXME - handle non-BGRA8Unorm textures
-                    match source.format() {
-                        BitmapFormat::Rgba => {}
-                        _ => unimplemented!(),
-                    }
-
-                    let bgra_data = source
-                        .data()
-                        .chunks_exact(4)
-                        .flat_map(|chunk| {
-                            // Convert from RGBA to BGRA
-                            [chunk[2], chunk[1], chunk[0], chunk[3]]
-                        })
-                        .collect::<Vec<_>>();
-
                     let dest = dest.as_any().downcast_ref::<TextureWrapper>().unwrap();
 
-                    // Note - this is very inefficient, since we allocate, and then destroy a buffer
-                    // every time we copy a bitmap to a texture.
-                    // Unfortunately, we cannot copy directly from the Ruffle texture, since the format
-                    // is incorrect (RGBA vs BGRA).
-                    // The `StagingBelt` helper doesn't support writing to textures, so we're using
-                    // our own setup for now.
-                    //
-                    // Hopefully, writing to textures is rare enough that this isn't a big deal.
+                    if dest.format != wgpu::TextureFormat::Rgba8Unorm {
+                        unimplemented!("Trying to copy to texture format {:?}", dest.format);
+                    }
 
-                    let texture_buffer = self.descriptors.device.create_buffer(&BufferDescriptor {
-                        label: None,
-                        size: 4 * source.width() as u64 * source.height() as u64,
-                        usage: BufferUsages::COPY_SRC,
-                        mapped_at_creation: true,
-                    });
+                    let source_texture = as_texture(source);
 
-                    let mut texture_buffer_view = texture_buffer.slice(..).get_mapped_range_mut();
-                    texture_buffer_view.copy_from_slice(&bgra_data);
-                    drop(texture_buffer_view);
-                    texture_buffer.unmap();
-
-                    buffer_command_encoder.copy_buffer_to_texture(
-                        wgpu::ImageCopyBuffer {
-                            buffer: &texture_buffer,
-                            layout: wgpu::ImageDataLayout {
-                                offset: 0,
-                                bytes_per_row: NonZeroU32::new(4 * source.width()),
-                                rows_per_image: Some(NonZeroU32::new(source.height()).unwrap()),
-                            },
+                    buffer_command_encoder.copy_texture_to_texture(
+                        ImageCopyTexture {
+                            texture: &source_texture.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
                         },
-                        wgpu::ImageCopyTexture {
-                            texture: &dest.0,
+                        ImageCopyTexture {
+                            texture: &dest.texture,
                             mip_level: 0,
                             origin: wgpu::Origin3d {
                                 x: 0,
@@ -526,9 +554,9 @@ impl WgpuContext3D {
                             },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        wgpu::Extent3d {
-                            width: source.width(),
-                            height: source.height(),
+                        Extent3d {
+                            width: source_texture.width,
+                            height: source_texture.height,
                             depth_or_array_layers: 1,
                         },
                     );
@@ -540,7 +568,8 @@ impl WgpuContext3D {
                 } => {
                     finish_render_pass!(render_pass);
                     let bound_texture = if let Some(texture) = texture {
-                        let texture = texture.as_any().downcast_ref::<TextureWrapper>().unwrap();
+                        let texture_wrapper =
+                            texture.as_any().downcast_ref::<TextureWrapper>().unwrap();
 
                         let mut view: wgpu::TextureViewDescriptor = Default::default();
                         if *cube {
@@ -549,7 +578,8 @@ impl WgpuContext3D {
                         }
 
                         Some(BoundTextureData {
-                            view: texture.0.create_view(&view),
+                            id: texture.clone(),
+                            view: texture_wrapper.texture.create_view(&view),
                             cube: *cube,
                         })
                     } else {
@@ -680,7 +710,10 @@ pub struct ShaderModuleAgal(Vec<u8>);
 
 #[derive(Collect)]
 #[collect(require_static)]
-pub struct TextureWrapper(wgpu::Texture);
+pub struct TextureWrapper {
+    texture: wgpu::Texture,
+    format: wgpu::TextureFormat,
+}
 
 impl IndexBuffer for IndexBufferWrapper {}
 impl VertexBuffer for VertexBufferWrapper {}
@@ -704,7 +737,7 @@ impl Context3D for WgpuContext3D {
     }
     fn should_render(&self) -> bool {
         // If this is None, we haven't called configureBackBuffer yet.
-        self.texture_view.is_some()
+        self.current_texture_view.is_some()
     }
 
     fn create_index_buffer(
@@ -756,14 +789,7 @@ impl Context3D for WgpuContext3D {
         _optimize_for_render_to_texture: bool,
         streaming_levels: u32,
     ) -> Result<Rc<dyn ruffle_render::backend::Texture>, Error> {
-        let format = match format {
-            Context3DTextureFormat::Bgra => TextureFormat::Bgra8Unorm,
-            _ => {
-                return Err(Error::Unimplemented(
-                    format!("Texture format {format:?}").into(),
-                ))
-            }
-        };
+        let format = convert_texture_format(format)?;
 
         if streaming_levels != 0 {
             return Err(Error::Unimplemented(
@@ -783,9 +809,11 @@ impl Context3D for WgpuContext3D {
             dimension: TextureDimension::D2,
             format,
             view_formats: &[format],
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::RENDER_ATTACHMENT,
         });
-        Ok(Rc::new(TextureWrapper(texture)))
+        Ok(Rc::new(TextureWrapper { texture, format }))
     }
 
     fn create_cube_texture(
@@ -794,11 +822,8 @@ impl Context3D for WgpuContext3D {
         format: ruffle_render::backend::Context3DTextureFormat,
         _optimize_for_render_to_texture: bool,
         streaming_levels: u32,
-    ) -> Rc<dyn ruffle_render::backend::Texture> {
-        let format = match format {
-            Context3DTextureFormat::Bgra => TextureFormat::Bgra8Unorm,
-            _ => panic!("Unsupported texture format {:?}", format),
-        };
+    ) -> Result<Rc<dyn ruffle_render::backend::Texture>, Error> {
+        let format = convert_texture_format(format)?;
 
         if streaming_levels != 0 {
             tracing::warn!(
@@ -822,10 +847,20 @@ impl Context3D for WgpuContext3D {
             // Note - `optimize_for_render_to_texture` is just a hint, so
             // have to use `TextureUsages::TEXTURE_BINDING` even if the hint
             // is `false`.
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::RENDER_ATTACHMENT,
         });
-        Rc::new(TextureWrapper(texture))
+        Ok(Rc::new(TextureWrapper { texture, format }))
     }
+}
+
+#[derive(Copy, Clone)]
+pub struct ClearColor {
+    rgb: wgpu::Color,
+    depth: f32,
+    stencil: u32,
+    mask: u32,
 }
 
 // This cannot be a method on `self`, because we need to only borrow certain fields
@@ -835,21 +870,21 @@ fn make_render_pass<'a>(
     command_encoder: &'a mut CommandEncoder,
     bind_group: &'a BindGroup,
     vertex_attributes: &'a [Option<VertexAttributeInfo>; MAX_VERTEX_ATTRIBUTES],
-    clear_color: Option<(wgpu::Color, u32)>,
+    clear_color: Option<ClearColor>,
     depth_view: Option<&'a wgpu::TextureView>,
 ) -> RenderPass<'a> {
-    let load = match clear_color {
-        Some((color, mask)) if mask & COLOR_MASK != 0 => wgpu::LoadOp::Clear(color),
+    let color_load = match clear_color {
+        Some(clear) if clear.mask & COLOR_MASK != 0 => wgpu::LoadOp::Clear(clear.rgb),
         _ => wgpu::LoadOp::Load,
     };
 
     let depth_load = match clear_color {
-        Some((_, mask)) if mask & DEPTH_MASK != 0 => wgpu::LoadOp::Clear(0.0),
+        Some(clear) if clear.mask & DEPTH_MASK != 0 => wgpu::LoadOp::Clear(clear.depth),
         _ => wgpu::LoadOp::Load,
     };
 
     let stencil_load = match clear_color {
-        Some((_, mask)) if mask & STENCIL_MASK != 0 => wgpu::LoadOp::Clear(0),
+        Some(clear) if clear.mask & STENCIL_MASK != 0 => wgpu::LoadOp::Clear(clear.stencil),
         _ => wgpu::LoadOp::Load,
     };
 
@@ -858,10 +893,9 @@ fn make_render_pass<'a>(
             view: depth_view,
             depth_ops: Some(wgpu::Operations {
                 load: depth_load,
-                store: false,
+                store: true,
             }),
             stencil_ops: Some(wgpu::Operations {
-                // FIXME - are these write?
                 load: stencil_load,
                 store: true,
             }),
@@ -875,7 +909,10 @@ fn make_render_pass<'a>(
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: texture_view,
             resolve_target: None,
-            ops: wgpu::Operations { load, store: true },
+            ops: wgpu::Operations {
+                load: color_load,
+                store: true,
+            },
         })],
         depth_stencil_attachment,
     });
@@ -894,4 +931,36 @@ fn make_render_pass<'a>(
         }
     }
     pass
+}
+
+fn convert_texture_format(input: Context3DTextureFormat) -> Result<wgpu::TextureFormat, Error> {
+    match input {
+        // All of these formats are unsupported by wgpu to various degrees:
+        // * Bgra doesn't exist in webgl
+        // * None of the other formats seem to exist at all in wgpu
+        //
+        // Instead, we just use Rgba8Unorm, which is the closest thing we have.
+        // When we implement Texture.uploadFromByteArray, we'll need to convert
+        // the user-supplied data to Rgba8Unorm.
+        //
+        // The Rgba8Unorm format stores more data for each channel, so this
+        // will result in (hopefully minor) rendering differences.
+        Context3DTextureFormat::Bgra => Ok(TextureFormat::Rgba8Unorm),
+        Context3DTextureFormat::BgraPacked => Ok(TextureFormat::Rgba8Unorm),
+        // Wgpu doesn't have 'Rgb8Unorm', so we use 'Rgba8Unorm' instead.
+        // Applications *should* use an opaque Bitmap with this format, so the
+        // alpha channel should be set to 1.0 and have no effect.
+        // FIXME: Validate that this is actually the case, and throw an
+        // error if we get an unexpected bitmap from ActionScript
+        Context3DTextureFormat::BgrPacked => Ok(TextureFormat::Rgba8Unorm),
+        // Starling claims that this is dxt5, which has an alpha channel
+        Context3DTextureFormat::CompressedAlpha => Ok(TextureFormat::Rgba8Unorm),
+        // Starling claims that this is dxt1. It's unclear if there's supposed
+        // to be an alpha channel, so we're relying on SWFS doing "the right thing"
+        // as with BgrPacked
+        Context3DTextureFormat::Compressed => Ok(TextureFormat::Rgba8Unorm),
+        _ => Err(Error::Unimplemented(
+            format!("Texture format {input:?}").into(),
+        )),
+    }
 }

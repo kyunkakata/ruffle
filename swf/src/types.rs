@@ -110,6 +110,23 @@ impl HeaderExt {
         }
     }
 
+    /// Returns the header for a loaded image (JPEG, GIF or PNG).
+    pub fn default_with_uncompressed_len(length: u32) -> Self {
+        let header = Header {
+            compression: Compression::None,
+            version: 0,
+            stage_size: Default::default(),
+            frame_rate: Fixed8::ONE,
+            num_frames: 1,
+        };
+        Self {
+            header,
+            file_attributes: Default::default(),
+            background_color: None,
+            uncompressed_len: length,
+        }
+    }
+
     /// The background color of the SWF from the SetBackgroundColor tag.
     ///
     /// `None` will be returned if the SetBackgroundColor tag was not found.
@@ -261,6 +278,7 @@ bitflags! {
     /// Flags that define various characteristic of an SWF file.
     ///
     /// [SWF19 pp.57-58 ClipEvent](https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf#page=47)
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct FileAttributes: u8 {
         /// Whether this SWF requests hardware acceleration to blit to the screen.
         const USE_DIRECT_BLIT = 1 << 6;
@@ -462,6 +480,7 @@ bitflags! {
     /// An event that can be attached to a MovieClip instance using an `onClipEvent` or `on` block.
     ///
     /// [SWF19 pp.48-50 ClipEvent](https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf#page=50)
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct ClipEventFlag: u32 {
         const LOAD            = 1 << 0;
         const ENTER_FRAME     = 1 << 1;
@@ -643,10 +662,11 @@ pub struct Shape {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct ShapeFlag: u8 {
         const HAS_SCALING_STROKES     = 1 << 0;
         const HAS_NON_SCALING_STROKES = 1 << 1;
-        const HAS_FILL_WINDING_RULE   = 1 << 2;
+        const NON_ZERO_WINDING_RULE   = 1 << 2;
     }
 }
 
@@ -868,7 +888,7 @@ impl LineStyle {
     #[inline]
     pub fn with_start_cap(mut self, val: LineCapStyle) -> Self {
         self.flags -= LineStyleFlag::START_CAP_STYLE;
-        self.flags |= LineStyleFlag::from_bits_truncate((val as u16) << 6);
+        self.flags |= LineStyleFlag::from_bits_retain((val as u16) << 6);
         self
     }
 
@@ -881,7 +901,7 @@ impl LineStyle {
     #[inline]
     pub fn with_end_cap(mut self, val: LineCapStyle) -> Self {
         self.flags -= LineStyleFlag::END_CAP_STYLE;
-        self.flags |= LineStyleFlag::from_bits_truncate((val as u16) << 8);
+        self.flags |= LineStyleFlag::from_bits_retain((val as u16) << 8);
         self
     }
 
@@ -955,6 +975,7 @@ impl Default for LineStyle {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct LineStyleFlag: u16 {
         // First byte.
         const PIXEL_HINTING = 1 << 0;
@@ -1061,6 +1082,7 @@ pub struct ButtonRecord {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct ButtonState: u8 {
         const UP       = 1 << 0;
         const OVER     = 1 << 1;
@@ -1094,6 +1116,7 @@ pub struct ButtonAction<'a> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct ButtonActionCondition: u16 {
         const IDLE_TO_OVER_UP       = 1 << 0;
         const OVER_UP_TO_IDLE       = 1 << 1;
@@ -1118,6 +1141,7 @@ pub struct DefineMorphShape {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct DefineMorphShapeFlag: u8 {
         const HAS_SCALING_STROKES     = 1 << 0;
         const HAS_NON_SCALING_STROKES = 1 << 1;
@@ -1151,6 +1175,7 @@ pub struct Font<'a> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct FontFlag: u8 {
         const IS_BOLD = 1 << 0;
         const IS_ITALIC = 1 << 1;
@@ -1206,6 +1231,7 @@ pub struct FontInfo<'a> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct FontInfoFlag: u8 {
         const HAS_WIDE_CODES = 1 << 0;
         const IS_BOLD = 1 << 1;
@@ -1559,6 +1585,7 @@ impl<'a> Default for EditText<'a> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct EditTextFlag: u16 {
         const HAS_FONT = 1 << 0;
         const HAS_MAX_LENGTH = 1 << 1;
@@ -1731,6 +1758,7 @@ pub struct DoAbc2<'a> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct DoAbc2Flag: u32 {
         const LAZY_INITIALIZE = 1 << 0;
     }

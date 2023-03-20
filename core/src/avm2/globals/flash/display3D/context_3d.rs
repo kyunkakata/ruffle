@@ -6,10 +6,12 @@ use ruffle_render::backend::Context3DTriangleFace;
 use ruffle_render::backend::Context3DVertexBufferFormat;
 use ruffle_render::backend::ProgramType;
 
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::Activation;
 use crate::avm2::TObject;
 use crate::avm2::Value;
 use crate::avm2::{Error, Object};
+use crate::avm2_stub_method;
 
 pub fn create_index_buffer<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -18,10 +20,7 @@ pub fn create_index_buffer<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
         // FIXME - get bufferUsage and pass it through
-        let num_indices = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let num_indices = args.get_u32(activation, 0)?;
         return context.create_index_buffer(num_indices, activation);
     }
     Ok(Value::Undefined)
@@ -34,14 +33,8 @@ pub fn create_vertex_buffer<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
         // FIXME - get bufferUsage and pass it through
-        let num_vertices = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
-        let data_32_per_vertex = args
-            .get(1)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let num_vertices = args.get_u32(activation, 0)?;
+        let data_32_per_vertex = args.get_u32(activation, 1)?;
 
         if data_32_per_vertex > 64 {
             return Err("data_32_per_vertex is greater than 64".into());
@@ -63,23 +56,39 @@ pub fn configure_back_buffer<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(mut context) = this.and_then(|this| this.as_context_3d()) {
-        let width = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
-        let height = args
-            .get(1)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let width = args.get_u32(activation, 0)?;
+        let height = args.get_u32(activation, 1)?;
 
-        let anti_alias = args
-            .get(2)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let anti_alias = args.get_u32(activation, 2)?;
         let enable_depth_and_stencil = args.get(3).unwrap_or(&Value::Undefined).coerce_to_boolean();
         let wants_best_resolution = args.get(4).unwrap_or(&Value::Undefined).coerce_to_boolean();
         let wants_best_resolution_on_browser_zoom =
             args.get(5).unwrap_or(&Value::Undefined).coerce_to_boolean();
+
+        if anti_alias != 0 {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "configureBackBuffer",
+                "antiAlias != 0"
+            );
+        }
+        if wants_best_resolution {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "configureBackBuffer",
+                "wantsBestResolution"
+            );
+        }
+        if wants_best_resolution_on_browser_zoom {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "configureBackBuffer",
+                "wantsBestResolutionOnBrowserZoom"
+            );
+        }
 
         context.configure_back_buffer(
             activation,
@@ -100,10 +109,7 @@ pub fn set_vertex_buffer_at<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
-        let index = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let index = args.get_u32(activation, 0)?;
         let buffer = if matches!(args[1], Value::Null) {
             None
         } else {
@@ -116,15 +122,9 @@ pub fn set_vertex_buffer_at<'gc>(
             )
         };
 
-        let buffer_offset = args
-            .get(2)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let buffer_offset = args.get_u32(activation, 2)?;
 
-        let format = args
-            .get(3)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_string(activation)?;
+        let format = args.get_string(activation, 3)?;
 
         let format = if &*format == b"float4" {
             Context3DVertexBufferFormat::Float4
@@ -187,14 +187,8 @@ pub fn draw_triangles<'gc>(
             .as_index_buffer()
             .unwrap();
 
-        let first_index = args
-            .get(1)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
-        let num_triangles = args
-            .get(2)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)? as i32;
+        let first_index = args.get_u32(activation, 1)?;
+        let num_triangles = args.get_u32(activation, 2)? as i32;
 
         context.draw_triangles(activation, index_buffer, first_index, num_triangles);
     }
@@ -218,10 +212,7 @@ pub fn set_culling<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
-        let culling = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_string(activation)?;
+        let culling = args.get_string(activation, 0)?;
 
         let culling = if &*culling == b"none" {
             Context3DTriangleFace::None
@@ -247,10 +238,7 @@ pub fn set_program_constants_from_matrix<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
-        let program_type = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_string(activation)?;
+        let program_type = args.get_string(activation, 0)?;
 
         let is_vertex = if &*program_type == b"vertex" {
             ProgramType::Vertex
@@ -260,10 +248,7 @@ pub fn set_program_constants_from_matrix<'gc>(
             panic!("Unknown program type {program_type:?}");
         };
 
-        let first_register = args
-            .get(1)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let first_register = args.get_u32(activation, 1)?;
 
         let mut matrix = args
             .get(2)
@@ -313,10 +298,7 @@ pub fn set_program_constants_from_vector<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(context) = this.and_then(|this| this.as_context_3d()) {
-        let program_type = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_string(activation)?;
+        let program_type = args.get_string(activation, 0)?;
 
         let program_type = if &*program_type == b"vertex" {
             ProgramType::Vertex
@@ -326,10 +308,7 @@ pub fn set_program_constants_from_vector<'gc>(
             panic!("Unknown program type {:?}", program_type);
         };
 
-        let first_register = args
-            .get(1)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_u32(activation)?;
+        let first_register = args.get_u32(activation, 1)?;
 
         let vector = args
             .get(2)
@@ -338,10 +317,7 @@ pub fn set_program_constants_from_vector<'gc>(
 
         let vector = vector.as_vector_storage().unwrap();
 
-        let num_registers = args
-            .get(3)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_i32(activation)?;
+        let num_registers = args.get_i32(activation, 3)?;
 
         let to_take = if num_registers != -1 {
             // Each register requries 4 floating-point values
@@ -401,11 +377,11 @@ pub fn create_texture<'gc>(
         let format = args[2].coerce_to_string(activation)?;
         let optimize_for_render_to_texture = args[3].coerce_to_boolean();
         let streaming_levels = args[4].as_integer(activation.context.gc_context)? as u32;
-        let format = if &*format == b"bgra" {
-            Context3DTextureFormat::Bgra
-        } else {
-            panic!("Unsupported texture format in createTexture: {:?}", format);
-        };
+        let format = Context3DTextureFormat::from_wstr(&format).ok_or_else(|| {
+            Error::RustError(
+                format!("Unsupported texture format in createTexture: {:?}", format).into(),
+            )
+        })?;
 
         let class = activation.avm2().classes().texture;
 
@@ -433,14 +409,15 @@ pub fn create_rectangle_texture<'gc>(
         let height = args[1].as_integer(activation.context.gc_context)? as u32;
         let format = args[2].coerce_to_string(activation)?;
         let optimize_for_render_to_texture = args[3].coerce_to_boolean();
-        let format = if &*format == b"bgra" {
-            Context3DTextureFormat::Bgra
-        } else {
-            panic!(
-                "Unsupported texture format in createRectangleTexture: {:?}",
-                format
-            );
-        };
+        let format = Context3DTextureFormat::from_wstr(&format).ok_or_else(|| {
+            Error::RustError(
+                format!(
+                    "Unsupported texture format in createRectangleTexture: {:?}",
+                    format
+                )
+                .into(),
+            )
+        })?;
 
         let class = activation.avm2().classes().rectangletexture;
 
@@ -468,14 +445,15 @@ pub fn create_cube_texture<'gc>(
         let format = args[1].coerce_to_string(activation)?;
         let optimize_for_render_to_texture = args[2].coerce_to_boolean();
         let streaming_levels = args[3].as_integer(activation.context.gc_context)? as u32;
-        let format = if &*format == b"bgra" {
-            Context3DTextureFormat::Bgra
-        } else {
-            panic!(
-                "Unsupported texture format in createCubeTexture: {:?}",
-                format
-            );
-        };
+        let format = Context3DTextureFormat::from_wstr(&format).ok_or_else(|| {
+            Error::RustError(
+                format!(
+                    "Unsupported texture format in createCubeTexture: {:?}",
+                    format
+                )
+                .into(),
+            )
+        })?;
 
         return context.create_cube_texture(
             size,
@@ -553,5 +531,67 @@ pub fn set_blend_factors<'gc>(
         };
         context.set_blend_factors(activation, source_factor, destination_factor);
     }
+    Ok(Value::Undefined)
+}
+
+pub fn set_render_to_texture<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let context = this.unwrap().as_context_3d().unwrap();
+    let texture = args
+        .get_object(activation, 0, "texture")?
+        .as_texture()
+        .unwrap();
+    let enable_depth_and_stencil = args.get_bool(1);
+    let anti_alias = args.get_u32(activation, 2)?;
+    let surface_selector = args.get_u32(activation, 3)?;
+    let color_output_index = args.get_u32(activation, 4)?;
+
+    if anti_alias != 0 {
+        avm2_stub_method!(
+            activation,
+            "flash.display3D.Context3D",
+            "setRenderToTexture",
+            "antiAlias != 0"
+        );
+    }
+
+    if surface_selector != 0 {
+        avm2_stub_method!(
+            activation,
+            "flash.display3D.Context3D",
+            "setRenderToTexture",
+            "surfaceSelector != 0"
+        );
+    }
+
+    if color_output_index != 0 {
+        avm2_stub_method!(
+            activation,
+            "flash.display3D.Context3D",
+            "setRenderToTexture",
+            "colorOutputIndex != 0"
+        );
+    }
+
+    context.set_render_to_texture(
+        activation,
+        texture.handle(),
+        enable_depth_and_stencil,
+        anti_alias,
+        surface_selector,
+    );
+    Ok(Value::Undefined)
+}
+
+pub fn set_render_to_back_buffer<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let context = this.unwrap().as_context_3d().unwrap();
+    context.set_render_to_back_buffer(activation);
     Ok(Value::Undefined)
 }

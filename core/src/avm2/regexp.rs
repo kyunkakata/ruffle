@@ -37,7 +37,7 @@ impl<'gc> Clone for RegExp<'gc> {
 }
 
 bitflags! {
-    #[derive(Collect)]
+    #[derive(Clone, Copy, Collect, Debug)]
     #[collect(require_static)]
     pub struct RegExpFlags: u8 {
         const GLOBAL       = 1 << 0;
@@ -103,6 +103,7 @@ impl<'gc> RegExp<'gc> {
                     multiline: self.flags.contains(RegExpFlags::MULTILINE),
                     dot_all: self.flags.contains(RegExpFlags::DOTALL),
                     no_opt: false,
+                    unicode: false,
                 },
             );
             self.cached_regex = Some(re.map_err(drop));

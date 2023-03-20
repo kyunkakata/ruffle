@@ -3,6 +3,7 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::LoaderInfoObject;
 use crate::avm2::object::TObject;
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::Multiname;
 use crate::avm2::{Error, Object};
@@ -20,11 +21,8 @@ pub fn init<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(mut this) = this {
         if this.as_display_object().is_none() {
-            let new_do = LoaderDisplay::new_with_avm2(
-                activation.context.gc_context,
-                this,
-                activation.context.swf.clone(),
-            );
+            let new_do =
+                LoaderDisplay::new_with_avm2(activation, this, activation.context.swf.clone());
             this.init_display_object(&mut activation.context, new_do.into());
         }
 
@@ -57,10 +55,8 @@ pub fn load<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
-        let url_request = args[0].as_object().unwrap();
-        let context = args
-            .get(1)
-            .and_then(|v| v.coerce_to_object(activation).ok());
+        let url_request = args.get_object(activation, 0, "request")?;
+        let context = args.try_get_object(activation, 1);
 
         let url = url_request
             .get_public_property("url", activation)?
@@ -106,11 +102,9 @@ pub fn load_bytes<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
-        let arg0 = args[0].as_object().unwrap();
+        let arg0 = args.get_object(activation, 0, "data")?;
         let bytearray = arg0.as_bytearray().unwrap();
-        let context = args
-            .get(1)
-            .and_then(|v| v.coerce_to_object(activation).ok());
+        let context = args.try_get_object(activation, 1);
 
         // This is a dummy MovieClip, which will get overwritten in `Loader`
         let content = MovieClip::new(

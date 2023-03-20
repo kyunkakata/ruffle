@@ -4,6 +4,7 @@ use crate::avm2::activation::Activation;
 use crate::avm2::error::range_error;
 use crate::avm2::globals::flash::display::sprite::init_empty_sprite;
 use crate::avm2::object::{Object, TObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::{ArrayObject, ArrayStorage, Error};
 use crate::context::UpdateContext;
@@ -94,6 +95,7 @@ fn remove_child_from_displaylist<'gc>(
 ) {
     if let Some(parent) = child.parent() {
         if let Some(mut ctr) = parent.as_container() {
+            child.set_placed_by_script(context.gc_context, true);
             ctr.remove_child(context, child);
         }
     }
@@ -122,11 +124,7 @@ pub fn get_child_at<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_container())
     {
-        let index = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_i32(activation)?;
+        let index = args.get_i32(activation, 0)?;
         return if let Some(child) = dobj.child_by_index(index as usize) {
             Ok(child.object2())
         } else {
@@ -152,11 +150,7 @@ pub fn get_child_by_name<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_container())
     {
-        let name = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_string(activation)?;
+        let name = args.get_string(activation, 0)?;
         if let Some(child) = dobj.child_by_name(&name, false) {
             return Ok(child.object2());
         } else {
@@ -176,12 +170,7 @@ pub fn add_child<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(ctr) = parent.as_container() {
-            let child = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .as_object()
-                .ok_or("ArgumentError: Child not a valid display object")?;
+            let child = args.get_object(activation, 0, "child")?;
             if child.as_display_object().is_none() {
                 let sprite = activation.avm2().classes().sprite;
                 if child.is_of_type(sprite, activation) {
@@ -213,17 +202,10 @@ pub fn add_child_at<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         let child = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
-            .and_then(|o| o.as_display_object())
+            .get_object(activation, 0, "child")?
+            .as_display_object()
             .ok_or("ArgumentError: Child not a valid display object")?;
-        let target_index = args
-            .get(1)
-            .cloned()
-            .ok_or("ArgumentError: Index to add child at not specified")?
-            .coerce_to_i32(activation)? as usize;
+        let target_index = args.get_u32(activation, 1)? as usize;
 
         validate_add_operation(activation, parent, child, target_index)?;
         add_child_to_displaylist(&mut activation.context, parent, child, target_index);
@@ -242,11 +224,8 @@ pub fn remove_child<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         let child = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
-            .and_then(|o| o.as_display_object())
+            .get_object(activation, 0, "child")?
+            .as_display_object()
             .ok_or("ArgumentError: Child not a valid display object")?;
 
         validate_remove_operation(parent, child)?;
@@ -276,19 +255,13 @@ pub fn get_num_children<'gc>(
 
 /// Implements `DisplayObjectContainer.contains`
 pub fn contains<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if parent.as_container().is_some() {
-            if let Some(child) = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .as_object()
-                .and_then(|o| o.as_display_object())
-            {
+            if let Some(child) = args.get_object(activation, 0, "child")?.as_display_object() {
                 let mut maybe_child_parent = Some(child);
                 while let Some(child_parent) = maybe_child_parent {
                     if DisplayObject::ptr_eq(child_parent, parent) {
@@ -306,18 +279,13 @@ pub fn contains<'gc>(
 
 /// Implements `DisplayObjectContainer.getChildIndex`
 pub fn get_child_index<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(ctr) = parent.as_container() {
-            let target_child = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .as_object()
-                .and_then(|o| o.as_display_object());
+            let target_child = args.get_object(activation, 0, "child")?.as_display_object();
 
             if let Some(target_child) = target_child {
                 for (i, child) in ctr.iter_render_list().enumerate() {
@@ -340,11 +308,7 @@ pub fn remove_child_at<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(mut ctr) = parent.as_container() {
-            let target_child = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_i32(activation)?;
+            let target_child = args.get_i32(activation, 0)?;
 
             if target_child >= ctr.num_children() as i32 || target_child < 0 {
                 // Flash error message: The supplied index is out of bounds.
@@ -360,6 +324,7 @@ pub fn remove_child_at<'gc>(
             }
 
             let child = ctr.child_by_index(target_child as usize).unwrap();
+            child.set_placed_by_script(activation.context.gc_context, true);
 
             ctr.remove_child(&mut activation.context, child);
 
@@ -378,16 +343,8 @@ pub fn remove_children<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(mut ctr) = parent.as_container() {
-            let from = args
-                .get(0)
-                .cloned()
-                .unwrap_or_else(|| 0.into())
-                .coerce_to_i32(activation)?;
-            let to = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| i32::MAX.into())
-                .coerce_to_i32(activation)?;
+            let from = args.get_i32(activation, 0)?;
+            let to = args.get_i32(activation, 1)?;
 
             if from >= ctr.num_children() as i32 || from < 0 {
                 // Flash error message: The supplied index is out of bounds.
@@ -442,17 +399,10 @@ pub fn set_child_index<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         let child = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
-            .and_then(|o| o.as_display_object())
+            .get_object(activation, 0, "child")?
+            .as_display_object()
             .ok_or("ArgumentError: Child not a valid display object")?;
-        let target_index = args
-            .get(1)
-            .cloned()
-            .ok_or("ArgumentError: Index to add child at not specified")?
-            .coerce_to_i32(activation)? as usize;
+        let target_index = args.get_u32(activation, 1)? as usize;
 
         let child_parent = child.parent();
         if child_parent.is_none() || !DisplayObject::ptr_eq(child_parent.unwrap(), parent) {
@@ -476,16 +426,8 @@ pub fn swap_children_at<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(mut ctr) = parent.as_container() {
-            let index0 = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_i32(activation)?;
-            let index1 = args
-                .get(1)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_i32(activation)?;
+            let index0 = args.get_i32(activation, 0)?;
+            let index1 = args.get_i32(activation, 1)?;
             let bounds = ctr.num_children();
 
             if index0 < 0 || index0 as usize >= bounds {
@@ -528,18 +470,12 @@ pub fn swap_children<'gc>(
     if let Some(parent) = this.and_then(|this| this.as_display_object()) {
         if let Some(mut ctr) = parent.as_container() {
             let child0 = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .as_object()
-                .and_then(|o| o.as_display_object())
+                .get_object(activation, 0, "child1")?
+                .as_display_object()
                 .ok_or("ArgumentError: Child is not a display object")?;
             let child1 = args
-                .get(1)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .as_object()
-                .and_then(|o| o.as_display_object())
+                .get_object(activation, 1, "child2")?
+                .as_display_object()
                 .ok_or("ArgumentError: Child is not a display object")?;
 
             let index0 = ctr
@@ -634,11 +570,7 @@ pub fn set_mouse_children<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_container())
     {
-        let mouse_children = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_boolean();
+        let mouse_children = args.get_bool(0);
 
         dobj.raw_container_mut(activation.context.gc_context)
             .set_mouse_children(mouse_children);

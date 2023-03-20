@@ -635,6 +635,18 @@ impl<'gc> Loader<'gc> {
                 );
             }
 
+            // We call these methods after we initialize the `LoaderInfo`, but before the
+            // add the the loaded clip as a child. The frame constructor should see
+            // 'this.parent == null' and 'this.stage == null'
+            mc.post_instantiation(context, None, Instantiator::Movie, false);
+            catchup_display_object_to_frame(context, mc.into());
+            // Movie clips created from ActionScript (including from a Loader) skip the next enterFrame,
+            // and consequently are observed to have their currentFrame lag one
+            // frame behind objects placed by the timeline (even if they were
+            // both placed in the same frame to begin with).
+            mc.base_mut(context.gc_context)
+                .set_skip_next_enter_frame(true);
+
             if let Some(MovieLoaderEventHandler::Avm2LoaderInfo(loader_info)) = event_handler {
                 let mut activation = Avm2Activation::from_nothing(context.reborrow());
                 let mut loader = loader_info
@@ -650,15 +662,12 @@ impl<'gc> Loader<'gc> {
                 // Note that we do *not* use the 'addChild' method here:
                 // Per the flash docs, our implementation always throws
                 // an 'unsupported' error. Also, the AVM2 side of our movie
-                // clip does not yet exist.
+                // clip does not yet exist. Any children added inside the movie
+                // frame constructor will see an 'added' event immediately, and
+                // an 'addedToStage' event *after* the constructor finishes
+                // when we add the movie as a child of the loader.
                 loader.insert_at_index(&mut activation.context, mc.into(), 0);
             }
-
-            // We call these methods after we initialize the `LoaderInfo` and add the loaded clip
-            // as a child. This may run an 'addedToStage' handler in the loaded movie,
-            // which should be able to access 'this.stage' and 'this.parent'
-            mc.post_instantiation(context, None, Instantiator::Movie, false);
-            catchup_display_object_to_frame(context, mc.into());
 
             Loader::movie_loader_complete(handle, context)?;
         }
@@ -751,7 +760,11 @@ impl<'gc> Loader<'gc> {
                     _ => unreachable!(),
                 };
 
-                replacing_root_movie = DisplayObject::ptr_eq(clip, uc.stage.root_clip());
+                replacing_root_movie = uc
+                    .stage
+                    .root_clip()
+                    .map(|root| DisplayObject::ptr_eq(clip, root))
+                    .unwrap_or(false);
 
                 if let Some(mut mc) = clip.as_movie_clip() {
                     if !uc.is_action_script_3() {
@@ -817,7 +830,11 @@ impl<'gc> Loader<'gc> {
                     _ => unreachable!(),
                 };
 
-                replacing_root_movie = DisplayObject::ptr_eq(clip, uc.stage.root_clip());
+                replacing_root_movie = uc
+                    .stage
+                    .root_clip()
+                    .map(|root| DisplayObject::ptr_eq(clip, root))
+                    .unwrap_or(false);
 
                 if let Some(mut mc) = clip.as_movie_clip() {
                     if !uc.is_action_script_3() {
@@ -1464,10 +1481,14 @@ impl<'gc> Loader<'gc> {
                         Loader::movie_loader_progress(handle, uc, 0, length)?;
                     }
 
+                    let movie = Arc::new(SwfMovie::from_loaded_image(url, length));
+
                     let bitmap = ruffle_render::utils::decode_define_bits_jpeg(data, None)?;
                     let bitmap_obj = Bitmap::new(uc, 0, bitmap)?;
 
-                    if let Some(mc) = clip.as_movie_clip() {
+                    if let Some(mut mc) = clip.as_movie_clip() {
+                        let mut activation = Avm2Activation::from_nothing(uc.reborrow());
+                        mc.replace_with_movie(&mut activation.context, Some(movie), None);
                         mc.replace_at_depth(uc, bitmap_obj.into(), 1);
                     }
                 }

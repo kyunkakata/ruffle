@@ -3,7 +3,7 @@ use gc_arena::Collect;
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
 use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, BitmapSize, BitmapSource};
 use ruffle_render::commands::CommandHandler;
-use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath};
+use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
 use std::cell::Cell;
 use swf::{FillStyle, LineStyle, Rectangle, Twips};
 
@@ -21,6 +21,7 @@ pub struct Drawing {
     pending_lines: Vec<DrawingLine>,
     cursor: (Twips, Twips),
     fill_start: (Twips, Twips),
+    winding_rule: FillRule,
 }
 
 impl Default for Drawing {
@@ -43,6 +44,7 @@ impl Drawing {
             pending_lines: Vec::new(),
             cursor: (Twips::ZERO, Twips::ZERO),
             fill_start: (Twips::ZERO, Twips::ZERO),
+            winding_rule: FillRule::EvenOdd,
         }
     }
 
@@ -59,6 +61,11 @@ impl Drawing {
             pending_lines: Vec::new(),
             cursor: (Twips::ZERO, Twips::ZERO),
             fill_start: (Twips::ZERO, Twips::ZERO),
+            winding_rule: if shape.flags.contains(swf::ShapeFlag::NON_ZERO_WINDING_RULE) {
+                FillRule::NonZero
+            } else {
+                FillRule::EvenOdd
+            },
         };
 
         let shape: DistilledShape = shape.into();
@@ -77,7 +84,12 @@ impl Drawing {
 
                     this.set_line_style(None);
                 }
-                DrawPath::Fill { style, commands } => {
+                DrawPath::Fill {
+                    style,
+                    commands,
+                    winding_rule,
+                } => {
+                    this.set_winding_rule(winding_rule);
                     this.set_fill_style(Some(style.clone()));
 
                     for command in commands {
@@ -90,6 +102,10 @@ impl Drawing {
         }
 
         this
+    }
+
+    pub fn set_winding_rule(&mut self, rule: FillRule) {
+        self.winding_rule = rule;
     }
 
     pub fn set_fill_style(&mut self, style: Option<FillStyle>) {
@@ -161,6 +177,12 @@ impl Drawing {
         self.dirty.set(true);
     }
 
+    pub fn set_line_fill_style(&mut self, fill_style: FillStyle) {
+        if let Some(style) = self.current_line.as_ref().map(|l| l.style.clone()) {
+            self.set_line_style(Some(style.with_fill_style(fill_style)));
+        }
+    }
+
     pub fn draw_command(&mut self, command: DrawCommand) {
         let add_to_bounds = if let DrawCommand::MoveTo { x, y } = command {
             // Close any pending fills before moving.
@@ -219,6 +241,7 @@ impl Drawing {
                         paths.push(DrawPath::Fill {
                             style: &fill.style,
                             commands: fill.commands.to_owned(),
+                            winding_rule: FillRule::EvenOdd,
                         });
                     }
                     DrawingPath::Line(line) => {
@@ -235,6 +258,7 @@ impl Drawing {
                 paths.push(DrawPath::Fill {
                     style: &fill.style,
                     commands: fill.commands.to_owned(),
+                    winding_rule: FillRule::EvenOdd,
                 })
             }
 

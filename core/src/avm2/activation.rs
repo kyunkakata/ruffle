@@ -3,7 +3,10 @@
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
-use crate::avm2::error::{make_null_or_undefined_error, type_error};
+use crate::avm2::e4x::{escape_attribute_value, escape_element_value};
+use crate::avm2::error::{
+    make_null_or_undefined_error, make_reference_error, type_error, ReferenceErrorCode,
+};
 use crate::avm2::method::{BytecodeMethod, Method, ParamConfig};
 use crate::avm2::object::{
     ArrayObject, ByteArrayObject, ClassObject, FunctionObject, NamespaceObject, ScriptObject,
@@ -17,7 +20,7 @@ use crate::avm2::Namespace;
 use crate::avm2::QName;
 use crate::avm2::{value, Avm2, Error};
 use crate::context::UpdateContext;
-use crate::string::{AvmString, WStr, WString};
+use crate::string::AvmString;
 use crate::swf::extensions::ReadSwfExt;
 use gc_arena::{Gc, GcCell};
 use smallvec::SmallVec;
@@ -284,7 +287,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ///
     /// This returns an error if a type is named but does not exist; or if the
     /// typed named is not a class object.
-    fn resolve_type(
+    pub fn resolve_type(
         &mut self,
         type_name: &Multiname<'gc>,
     ) -> Result<Option<ClassObject<'gc>>, Error<'gc>> {
@@ -349,13 +352,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .into());
         };
 
-        let param_type = self.resolve_type(&param_config.param_type_name)?;
-
-        if let Some(param_type) = param_type {
-            arg.coerce_to_type(self, param_type)
-        } else {
-            Ok(arg.into_owned())
-        }
+        arg.coerce_to_type_name(self, &param_config.param_type_name)
     }
 
     /// Statically resolve all of the parameters for a given method.
@@ -434,23 +431,31 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             RegisterSet::new(num_locals + num_declared_arguments + arg_register + 1);
         *local_registers.get_mut(0).unwrap() = this.map(|t| t.into()).unwrap_or(Value::Null);
 
-        let activation_class = if method
-            .method()
-            .flags
-            .contains(AbcMethodFlags::NEED_ACTIVATION)
-        {
-            let translation_unit = method.translation_unit();
-            let abc_method = method.method();
-            let mut dummy_activation = Activation::from_nothing(context.reborrow());
-            dummy_activation.set_outer(outer);
-            let activation_class =
-                Class::for_activation(&mut dummy_activation, translation_unit, abc_method, body)?;
-            let activation_class_object =
-                ClassObject::from_class(&mut dummy_activation, activation_class, None)?;
+        let activation_class = if let Some(class_cache) = method.activation_class {
+            let cached_cls = class_cache.read();
+            let activation_class = if let Some(cls) = *cached_cls {
+                cls
+            } else {
+                drop(cached_cls);
+                let translation_unit = method.translation_unit();
+                let abc_method = method.method();
+                let mut dummy_activation = Activation::from_nothing(context.reborrow());
+                dummy_activation.set_outer(outer);
+                let activation_class = Class::for_activation(
+                    &mut dummy_activation,
+                    translation_unit,
+                    abc_method,
+                    body,
+                )?;
+                let activation_class_object =
+                    ClassObject::from_class(&mut dummy_activation, activation_class, None)?;
+                drop(dummy_activation);
 
-            drop(dummy_activation);
+                *class_cache.write(context.gc_context) = Some(activation_class_object);
+                activation_class_object
+            };
 
-            Some(activation_class_object)
+            Some(activation_class)
         } else {
             None
         };
@@ -937,10 +942,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             }
         }
 
-        tracing::error!("AVM2 error: {:?}", error);
-        if let Some(err) = error.as_object().and_then(|obj| obj.as_error_object()) {
-            tracing::error!("{}", err.display_full(self)?);
-        }
         Err(Error::AvmError(error))
     }
 
@@ -1021,6 +1022,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::FindProperty { index } => self.op_find_property(method, index),
                 Op::FindPropStrict { index } => self.op_find_prop_strict(method, index),
                 Op::GetLex { index } => self.op_get_lex(method, index),
+                Op::GetDescendants { index } => self.op_get_descendants(method, index),
                 Op::GetSlot { index } => self.op_get_slot(index),
                 Op::SetSlot { index } => self.op_set_slot(index),
                 Op::GetGlobalSlot { index } => self.op_get_global_slot(index),
@@ -1791,12 +1793,32 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         avm_debug!(self.context.avm2, "Resolving {:?}", *multiname);
-        let found: Result<Object<'gc>, Error<'gc>> = self
-            .find_definition(&multiname)?
-            .ok_or_else(|| format!("Property does not exist: {:?}", *multiname).into());
+        let found: Result<Object<'gc>, Error<'gc>> =
+            self.find_definition(&multiname)?.ok_or_else(|| {
+                make_reference_error(self, ReferenceErrorCode::InvalidLookup, &multiname, None)
+            });
         let result: Value<'gc> = found?.into();
 
         self.push_stack(result);
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_get_descendants(
+        &mut self,
+        method: Gc<'gc, BytecodeMethod<'gc>>,
+        index: Index<AbcMultiname>,
+    ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        let multiname = self.pool_multiname_and_initialize(method, index)?;
+        let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
+        let descendants = object.call_public_property(
+            "descendants",
+            &[multiname
+                .to_qualified_name_or_star(self.context.gc_context)
+                .into()],
+            self,
+        )?;
+        self.push_stack(descendants);
 
         Ok(FrameControl::Continue)
     }
@@ -1808,9 +1830,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let multiname = self.pool_multiname_static(method, index)?;
         avm_debug!(self.avm2(), "Resolving {:?}", *multiname);
-        let found: Result<Value<'gc>, Error<'gc>> = self
-            .resolve_definition(&multiname)?
-            .ok_or_else(|| format!("Property does not exist: {:?}", *multiname).into());
+        let found: Result<Value<'gc>, Error<'gc>> =
+            self.resolve_definition(&multiname)?.ok_or_else(|| {
+                make_reference_error(self, ReferenceErrorCode::InvalidLookup, &multiname, None)
+            });
 
         self.push_stack(found?);
 
@@ -2898,23 +2921,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let s = self.pop_stack().coerce_to_string(self)?;
 
         // Implementation of `EscapeAttributeValue` from ECMA-357(10.2.1.2)
-        let mut r = WString::with_capacity(s.len(), s.is_wide());
-        for c in &s {
-            let escape: &[u8] = match u8::try_from(c) {
-                Ok(b'"') => b"&quot;",
-                Ok(b'<') => b"&lt;",
-                Ok(b'&') => b"&amp;",
-                Ok(b'\x0A') => b"&#xA;",
-                Ok(b'\x0D') => b"&#xD;",
-                Ok(b'\x09') => b"&#x9;",
-                _ => {
-                    r.push(c);
-                    continue;
-                }
-            };
-
-            r.push_str(WStr::from_units(escape));
-        }
+        let r = escape_attribute_value(s);
         self.push_stack(AvmString::new(self.context.gc_context, r));
 
         Ok(FrameControl::Continue)
@@ -2925,21 +2932,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let s = self.pop_stack().coerce_to_string(self)?;
 
         // contrary to the avmplus documentation, this escapes the value on the top of the stack using EscapeElementValue from ECMA-357 *NOT* EscapeAttributeValue.
-        // Implementation of `EscapeElementValue` from ECMA-357(10.2.1.1)
-        let mut r = WString::with_capacity(s.len(), s.is_wide());
-        for c in &s {
-            let escape: &[u8] = match u8::try_from(c) {
-                Ok(b'<') => b"&lt;",
-                Ok(b'>') => b"&gt;",
-                Ok(b'&') => b"&amp;",
-                _ => {
-                    r.push(c);
-                    continue;
-                }
-            };
-
-            r.push_str(WStr::from_units(escape));
-        }
+        let r = escape_element_value(s);
         self.push_stack(AvmString::new(self.context.gc_context, r));
 
         Ok(FrameControl::Continue)
@@ -2975,39 +2968,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let val = self.pop_stack();
         let type_name = self.pool_multiname_static_any(method, index)?;
-
-        let param_type = match self.resolve_type(&type_name) {
-            Ok(param_type) => param_type,
-            Err(e) => {
-                // While running a class initializer, we might need to resolve the class
-                // itself. For example, a static/const can run a static method, which does
-                // `var foo:ClassBeingInitialized = new ClassBeingInitialized();`
-                //
-                // Since the class initializer is running, we won't be able to resolve the
-                // ClassObject yet. If the normal `resolve_type` lookup fails, then
-                // try resolving the class through `domain().get_class`, and check if the
-                // object's class matches directly (not considering superclasses or interfaces).
-                // Any superclasses or superinterfaces will already have been initialized,
-                // so the `resolve_type` lookup will succeed for them.
-                if let Some(obj) = val.as_object() {
-                    if let Ok(Some(resolved_class)) = self.domain().get_class(&type_name) {
-                        if let Some(obj_class) = obj.instance_of_class_definition() {
-                            if GcCell::ptr_eq(resolved_class, obj_class) {
-                                self.push_stack(val);
-                                return Ok(FrameControl::Continue);
-                            }
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        };
-
-        let x = if let Some(param_type) = param_type {
-            val.coerce_to_type(self, param_type)?
-        } else {
-            val
-        };
+        let x = val.coerce_to_type_name(self, &type_name)?;
 
         self.push_stack(x);
         Ok(FrameControl::Continue)

@@ -2,12 +2,11 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::object::{Object, StageObject, TObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::display_object::{MovieClip, SoundTransform, TDisplayObject};
-use crate::tag_utils::SwfMovie;
-use std::sync::Arc;
 use swf::{Rectangle, Twips};
 
 /// Implements `flash.display.Sprite`'s `init` method, which is called from the constructor
@@ -34,7 +33,7 @@ pub fn init_empty_sprite<'gc>(
     let class_object = this
         .instance_of()
         .ok_or("Attempted to construct Sprite on a bare object")?;
-    let movie = Arc::new(SwfMovie::empty(activation.context.swf.version()));
+    let movie = activation.context.swf.clone();
     let new_do = MovieClip::new_with_avm2(movie, this, class_object, activation.context.gc_context);
 
     this.init_display_object(&mut activation.context, new_do.into());
@@ -112,11 +111,7 @@ pub fn set_sound_transform<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.and_then(|o| o.as_display_object()) {
-        let as3_st = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_object(activation)?;
+        let as3_st = args.get_object(activation, 0, "value")?;
         let dobj_st = SoundTransform::from_avm2_object(activation, as3_st)?;
 
         dobj.set_sound_transform(&mut activation.context, dobj_st);
@@ -151,11 +146,7 @@ pub fn set_button_mode<'gc>(
         .and_then(|o| o.as_display_object())
         .and_then(|o| o.as_movie_clip())
     {
-        let forced_button_mode = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_boolean();
+        let forced_button_mode = args.get_bool(0);
 
         mc.set_forced_button_mode(&mut activation.context, forced_button_mode);
     }
@@ -171,7 +162,7 @@ pub fn start_drag<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(display_object) = this.and_then(|this| this.as_display_object()) {
-        let lock_center = args.get(0).map(|o| o.coerce_to_boolean()).unwrap_or(false);
+        let lock_center = args.get_bool(0);
 
         let offset = if lock_center {
             // The object's origin point is locked to the mouse.
@@ -184,21 +175,21 @@ pub fn start_drag<'gc>(
             (object_x - mouse_x, object_y - mouse_y)
         };
 
-        let constraint = if !matches!(args[1], Value::Null) {
-            let rect = args[1].coerce_to_object(activation)?;
-            let x = rect
+        let rectangle = args.try_get_object(activation, 1);
+        let constraint = if let Some(rectangle) = rectangle {
+            let x = rectangle
                 .get_public_property("x", activation)?
                 .coerce_to_number(activation)?;
 
-            let y = rect
+            let y = rectangle
                 .get_public_property("y", activation)?
                 .coerce_to_number(activation)?;
 
-            let width = rect
+            let width = rectangle
                 .get_public_property("width", activation)?
                 .coerce_to_number(activation)?;
 
-            let height = rect
+            let height = rectangle
                 .get_public_property("height", activation)?
                 .coerce_to_number(activation)?;
 
@@ -277,13 +268,7 @@ pub fn set_use_hand_cursor<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_movie_clip())
     {
-        mc.set_use_hand_cursor(
-            &mut activation.context,
-            args.get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_boolean(),
-        );
+        mc.set_use_hand_cursor(&mut activation.context, args.get_bool(0));
     }
 
     Ok(Value::Undefined)
@@ -316,12 +301,10 @@ pub fn set_hit_area<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_movie_clip())
     {
-        mc.set_hit_area(
-            &mut activation.context,
-            args.get(0)
-                .and_then(|hit_area| hit_area.as_object())
-                .and_then(|hit_area| hit_area.as_display_object()),
-        );
+        let object = args
+            .try_get_object(activation, 0)
+            .and_then(|hit_area| hit_area.as_display_object());
+        mc.set_hit_area(&mut activation.context, object);
     }
 
     Ok(Value::Undefined)

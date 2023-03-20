@@ -11,6 +11,7 @@ use swf::ButtonState;
 pub use crate::avm2::globals::flash::media::soundmixer::{
     get_sound_transform, set_sound_transform,
 };
+use crate::avm2::parameters::ParametersExt;
 
 /// Implements `flash.display.SimpleButton`'s 'init' method. which is called from the constructor
 pub fn init<'gc>(
@@ -28,34 +29,22 @@ pub fn init<'gc>(
             this.init_display_object(&mut activation.context, new_do.into());
 
             let up_state = args
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .as_object()
+                .try_get_object(activation, 0)
                 .and_then(|o| o.as_display_object());
             new_do.set_state_child(&mut activation.context, ButtonState::UP, up_state);
 
             let over_state = args
-                .get(1)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .as_object()
+                .try_get_object(activation, 1)
                 .and_then(|o| o.as_display_object());
             new_do.set_state_child(&mut activation.context, ButtonState::OVER, over_state);
 
             let down_state = args
-                .get(2)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .as_object()
+                .try_get_object(activation, 2)
                 .and_then(|o| o.as_display_object());
             new_do.set_state_child(&mut activation.context, ButtonState::DOWN, down_state);
 
             let hit_state = args
-                .get(3)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .as_object()
+                .try_get_object(activation, 3)
                 .and_then(|o| o.as_display_object());
             new_do.set_state_child(&mut activation.context, ButtonState::HIT_TEST, hit_state);
         }
@@ -94,10 +83,7 @@ pub fn set_down_state<'gc>(
         .and_then(|this| this.as_avm2_button())
     {
         let new_state = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
+            .try_get_object(activation, 0)
             .and_then(|val| val.as_display_object());
 
         btn.set_state_child(&mut activation.context, ButtonState::DOWN, new_state);
@@ -136,10 +122,7 @@ pub fn set_over_state<'gc>(
         .and_then(|this| this.as_avm2_button())
     {
         let new_state = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
+            .try_get_object(activation, 0)
             .and_then(|val| val.as_display_object());
 
         btn.set_state_child(&mut activation.context, ButtonState::OVER, new_state);
@@ -178,10 +161,7 @@ pub fn set_hit_test_state<'gc>(
         .and_then(|this| this.as_avm2_button())
     {
         let new_state = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
+            .try_get_object(activation, 0)
             .and_then(|val| val.as_display_object());
 
         btn.set_state_child(&mut activation.context, ButtonState::HIT_TEST, new_state);
@@ -220,10 +200,7 @@ pub fn set_up_state<'gc>(
         .and_then(|this| this.as_avm2_button())
     {
         let new_state = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .as_object()
+            .try_get_object(activation, 0)
             .and_then(|val| val.as_display_object());
 
         btn.set_state_child(&mut activation.context, ButtonState::UP, new_state);
@@ -258,12 +235,7 @@ pub fn set_track_as_menu<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_avm2_button())
     {
-        match args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_boolean()
-        {
+        match args.get_bool(0) {
             true => btn.set_button_tracking(&mut activation.context, ButtonTracking::Menu),
             false => btn.set_button_tracking(&mut activation.context, ButtonTracking::Push),
         }
@@ -298,13 +270,7 @@ pub fn set_enabled<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_avm2_button())
     {
-        btn.set_enabled(
-            &mut activation.context,
-            args.get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_boolean(),
-        );
+        btn.set_enabled(&mut activation.context, args.get_bool(0));
     }
 
     Ok(Value::Undefined)
@@ -336,13 +302,7 @@ pub fn set_use_hand_cursor<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_avm2_button())
     {
-        btn.set_use_hand_cursor(
-            &mut activation.context,
-            args.get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_boolean(),
-        );
+        btn.set_use_hand_cursor(&mut activation.context, args.get_bool(0));
     }
 
     Ok(Value::Undefined)

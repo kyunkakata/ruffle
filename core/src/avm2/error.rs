@@ -19,6 +19,20 @@ pub enum Error<'gc> {
     RustError(Box<dyn std::error::Error>),
 }
 
+impl<'gc> Error<'gc> {
+    pub fn detailed_message(&self, activation: &mut Activation<'_, 'gc>) -> String {
+        if let Error::AvmError(error) = self {
+            if let Some(error) = error.as_object().and_then(|obj| obj.as_error_object()) {
+                if let Ok(text) = error.display_full(activation) {
+                    return text.to_string();
+                }
+            }
+        }
+
+        self.to_string()
+    }
+}
+
 // This type is used very frequently, so make sure it doesn't unexpectedly grow.
 // For now, we only test on Nightly, since a new niche optimization was recently
 // added (https://github.com/rust-lang/rust/pull/94075) that shrinks the size
@@ -69,6 +83,7 @@ pub fn make_null_or_undefined_error<'gc>(
 pub enum ReferenceErrorCode {
     AssignToMethod = 1037,
     InvalidWrite = 1056,
+    InvalidLookup = 1065,
     InvalidRead = 1069,
     WriteToReadOnly = 1074,
     ReadFromWriteOnly = 1077,
@@ -100,6 +115,7 @@ pub fn make_reference_error<'gc>(
         ReferenceErrorCode::InvalidWrite => format!(
             "Error #1056: Cannot create property {qualified_name} on {class_name}.",
         ),
+        ReferenceErrorCode::InvalidLookup => format!("Error #1065: Variable {qualified_name} is not defined."),
         ReferenceErrorCode::InvalidRead => format!(
             "Error #1069: Property {qualified_name} not found on {class_name} and there is no default value.",
         ),
