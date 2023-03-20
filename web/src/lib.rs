@@ -33,7 +33,7 @@ use std::time::Duration;
 use std::{cell::RefCell, error::Error, num::NonZeroI32};
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::registry::Registry;
-use tracing_wasm::{WASMLayer, WASMLayerConfigBuilder};
+use tracing_wasm::{ConsoleConfig, WASMLayer, WASMLayerConfigBuilder};
 use url::Url;
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use web_sys::{
@@ -500,10 +500,18 @@ impl Ruffle {
             .ignore_crate("wgpu_hal")
             .ignore_crate("wgpu_core")
             .init();
+
+        // Remove console logging if profiling is disabled
+        let mut console_config = ConsoleConfig::NoReporting;
+        if cfg!(feature = "avm_debug") {
+            console_config = ConsoleConfig::ReportWithConsoleColor;
+        }
+
         let log_subscriber = Arc::new(
             Registry::default().with(WASMLayer::new(
                 WASMLayerConfigBuilder::new()
                     .set_report_logs_in_timings(cfg!(feature = "profiling"))
+                    .set_console_config(console_config)
                     .set_max_level(config.log_level)
                     .build(),
             )),
