@@ -2920,6 +2920,7 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                 }
             }
 
+            let is_button_mode = self.is_button_mode(context);
             // In AVM2, mouse_enabled should only impact the ability to select the current clip
             // but it should still be possible to select any children where child.mouse_enabled() is
             // true.
@@ -2928,7 +2929,6 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             if self.mouse_enabled() && self.world_bounds().contains(point) {
                 // This MovieClip operates in "button mode" if it has a mouse handler,
                 // either via on(..) or via property mc.onRelease, etc.
-                let is_button_mode = self.is_button_mode(context);
 
                 if is_button_mode {
                     let mut options = HitTestOptions::SKIP_INVISIBLE;
@@ -2955,6 +2955,22 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                             return result;
                         } else {
                             result = None;
+                        }
+                    } else {
+                        //TODO: Kyun check if should be trigger hidden click ?
+                        if child.clip_depth() == 0 || child.clip_depth() >= hit_depth {
+                            if let Some(child) = child.as_interactive() {
+                                result = child.mouse_pick_avm1(context, point, require_button_mode);
+                            } else if check_non_interactive
+                                && self.mouse_enabled()
+                                && child.hit_test_shape(context, point, options)
+                            {
+                                result = Some(this);
+                            }
+
+                            if result.is_some() {
+                                hit_depth = child.clip_depth();
+                            }
                         }
                     }
                 } else if result.is_none() {
