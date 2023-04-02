@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
-use crate::bitmap::{Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSize, BitmapSource, SyncHandle};
+use crate::backend::{RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions};
+use crate::bitmap::{
+    Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSize, BitmapSource, PixelRegion, SyncHandle,
+};
 use crate::commands::CommandList;
 use crate::error::Error;
 use crate::quality::StageQuality;
@@ -32,9 +34,14 @@ impl NullRenderer {
         Self { dimensions }
     }
 }
+
 #[derive(Clone, Debug)]
 struct NullBitmapHandle;
 impl BitmapHandleImpl for NullBitmapHandle {}
+
+#[derive(Clone, Debug)]
+struct NullShapeHandle;
+impl ShapeHandleImpl for NullShapeHandle {}
 
 impl RenderBackend for NullRenderer {
     fn viewport_dimensions(&self) -> ViewportDimensions {
@@ -48,26 +55,15 @@ impl RenderBackend for NullRenderer {
         _shape: DistilledShape,
         _bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
-        ShapeHandle(0)
-    }
-    fn replace_shape(
-        &mut self,
-        _shape: DistilledShape,
-        _bitmap_source: &dyn BitmapSource,
-        _handle: ShapeHandle,
-    ) {
-    }
-    fn register_glyph_shape(&mut self, _shape: &swf::Glyph) -> ShapeHandle {
-        ShapeHandle(0)
+        ShapeHandle(Arc::new(NullShapeHandle))
     }
 
     fn render_offscreen(
         &mut self,
         _handle: BitmapHandle,
-        _width: u32,
-        _height: u32,
         _commands: CommandList,
         _quality: StageQuality,
+        _bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
         None
     }
@@ -80,9 +76,8 @@ impl RenderBackend for NullRenderer {
     fn update_texture(
         &mut self,
         _bitmap: &BitmapHandle,
-        _width: u32,
-        _height: u32,
         _rgba: Vec<u8>,
+        _region: PixelRegion,
     ) -> Result<(), Error> {
         Ok(())
     }

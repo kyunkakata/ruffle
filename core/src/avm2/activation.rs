@@ -5,7 +5,8 @@ use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::e4x::{escape_attribute_value, escape_element_value};
 use crate::avm2::error::{
-    make_null_or_undefined_error, make_reference_error, type_error, ReferenceErrorCode,
+    argument_error, make_null_or_undefined_error, make_reference_error, type_error,
+    ReferenceErrorCode,
 };
 use crate::avm2::method::{BytecodeMethod, Method, ParamConfig};
 use crate::avm2::object::{
@@ -116,7 +117,7 @@ pub struct Activation<'a, 'gc: 'a> {
     ///
     /// If this activation was not made for a builtin method, this will be the
     /// current domain instead.
-    caller_domain: Domain<'gc>,
+    caller_domain: Option<Domain<'gc>>,
 
     /// The class that yielded the currently executing method.
     ///
@@ -175,7 +176,38 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             local_registers,
             return_value: None,
             outer: ScopeChain::new(context.avm2.globals),
-            caller_domain: context.avm2.globals,
+            caller_domain: None,
+            subclass_object: None,
+            activation_class: None,
+            stack_depth: context.avm2.stack.len(),
+            scope_depth: context.avm2.scope_stack.len(),
+            max_stack_size: 0,
+            max_scope_size: 0,
+            context,
+        }
+    }
+
+    /// Like `from_nothing`, but with a specified domain.
+    ///
+    /// This should be used when you actually need to run AVM2 code, but
+    /// don't have a particular scope to run it in. For example, this is
+    /// used to run frame scripts for AVM2 movies.
+    ///
+    /// The 'Domain' should come from the SwfMovie associated with whatever
+    /// action you're performing. When running frame scripts, this is the
+    /// `SwfMovie` associated with the `MovieClip` being processed.
+    pub fn from_domain(context: UpdateContext<'a, 'gc>, domain: Domain<'gc>) -> Self {
+        let local_registers = RegisterSet::new(0);
+
+        Self {
+            this: None,
+            arguments: None,
+            is_executing: false,
+            actions_since_timeout_check: 0,
+            local_registers,
+            return_value: None,
+            outer: ScopeChain::new(context.avm2.globals),
+            caller_domain: Some(domain),
             subclass_object: None,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
@@ -219,7 +251,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             local_registers,
             return_value: None,
             outer: ScopeChain::new(domain),
-            caller_domain: domain,
+            caller_domain: Some(domain),
             subclass_object: None,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
@@ -345,11 +377,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         } else if param_config.param_type_name.is_any_name() {
             return Ok(Value::Undefined);
         } else {
-            return Err(format!(
-                "Param {} (index {index}) was missing when calling {method_name}",
-                param_config.param_name
-            )
-            .into());
+            return Err(Error::AvmError(argument_error(
+                self,
+                &format!(
+                    "Error #1063: Argument count mismatch on {} on index {}.",
+                    method_name, index
+                ),
+                1063,
+            )?));
         };
 
         arg.coerce_to_type_name(self, &param_config.param_type_name)
@@ -439,7 +474,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 drop(cached_cls);
                 let translation_unit = method.translation_unit();
                 let abc_method = method.method();
-                let mut dummy_activation = Activation::from_nothing(context.reborrow());
+                let mut dummy_activation =
+                    Activation::from_domain(context.reborrow(), outer.domain());
                 dummy_activation.set_outer(outer);
                 let activation_class = Class::for_activation(
                     &mut dummy_activation,
@@ -468,7 +504,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             local_registers,
             return_value: None,
             outer,
-            caller_domain: outer.domain(),
+            caller_domain: Some(outer.domain()),
             subclass_object,
             activation_class,
             stack_depth: context.avm2.stack.len(),
@@ -551,7 +587,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             local_registers,
             return_value: None,
             outer,
-            caller_domain,
+            caller_domain: Some(caller_domain),
             subclass_object,
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
@@ -637,7 +673,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     /// Returns the domain of the original AS3 caller.
     pub fn caller_domain(&self) -> Domain<'gc> {
-        self.caller_domain
+        self.caller_domain.expect("No caller domain available - use Activation::from_domain when constructing your domain")
     }
 
     /// Returns the global scope of this activation.
@@ -2985,7 +3021,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Implements `Op::Si8`
     fn op_si8(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
-        let val = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)? as i8;
 
         let dm = self.domain_memory();
         let mut dm = dm
@@ -3002,7 +3038,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Implements `Op::Si16`
     fn op_si16(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
-        let val = self.pop_stack().coerce_to_i32(self)?;
+        let val = self.pop_stack().coerce_to_i32(self)? as i16;
 
         let dm = self.domain_memory();
         let mut dm = dm

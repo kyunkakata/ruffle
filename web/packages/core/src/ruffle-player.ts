@@ -3,13 +3,8 @@ import { loadRuffle } from "./load-ruffle";
 import { ruffleShadowTemplate } from "./shadow-template";
 import { lookupElement } from "./register-element";
 import { DEFAULT_CONFIG } from "./config";
-import {
-    DataLoadOptions,
-    URLLoadOptions,
-    AutoPlay,
-    UnmuteOverlay,
-    WindowMode,
-} from "./load-options";
+import type { DataLoadOptions, URLLoadOptions } from "./load-options";
+import { AutoPlay, UnmuteOverlay, WindowMode } from "./load-options";
 import type { MovieMetadata } from "./movie-metadata";
 import { swfFileName } from "./swf-file-name";
 import { buildInfo } from "./build-info";
@@ -122,6 +117,7 @@ export class RufflePlayer extends HTMLElement {
     private readonly unmuteOverlay: HTMLElement;
     private readonly splashScreen: HTMLElement;
     private readonly virtualKeyboard: HTMLInputElement;
+    private readonly saveManager: HTMLDialogElement;
 
     // Firefox has a read-only "contextMenu" property,
     // so avoid shadowing it.
@@ -228,6 +224,28 @@ export class RufflePlayer extends HTMLElement {
             "input",
             this.virtualKeyboardInput.bind(this)
         );
+        this.saveManager = <HTMLDialogElement>(
+            this.shadow.getElementById("save-manager")!
+        );
+        this.saveManager.addEventListener("click", () =>
+            this.saveManager.close()
+        );
+        const modalArea = this.saveManager.querySelector("#modal-area");
+        if (modalArea) {
+            modalArea.addEventListener("click", (event) =>
+                event.stopPropagation()
+            );
+        }
+        const closeSaveManager = this.saveManager.querySelector("#close-modal");
+        if (closeSaveManager) {
+            closeSaveManager.addEventListener("click", () =>
+                this.saveManager.close()
+            );
+        }
+        const backupSaves = this.saveManager.querySelector("#backup-saves");
+        if (backupSaves) {
+            backupSaves.addEventListener("click", this.backupSaves.bind(this));
+        }
 
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
         window.addEventListener("pointerdown", this.pointerDown.bind(this));
@@ -609,6 +627,24 @@ export class RufflePlayer extends HTMLElement {
         );
         return options;
     }
+    /**
+     * Gets the configuration set by the Ruffle extension
+     *
+     * @returns The configuration set by the Ruffle extension
+     */
+    getExtensionConfig(): Record<string, unknown> {
+        return window.RufflePlayer &&
+            window.RufflePlayer.conflict &&
+            (window.RufflePlayer.conflict["newestName"] === "extension" ||
+                (window.RufflePlayer as Record<string, unknown>)[
+                    "newestName"
+                ] === "extension")
+            ? (window.RufflePlayer?.conflict["config"] as Record<
+                  string,
+                  unknown
+              >)
+            : {};
+    }
 
     /**
      * Loads a specified movie into this player.
@@ -641,8 +677,10 @@ export class RufflePlayer extends HTMLElement {
         }
 
         try {
+            const extensionConfig = this.getExtensionConfig();
             this.loadedConfig = {
                 ...DEFAULT_CONFIG,
+                ...extensionConfig,
                 ...(window.RufflePlayer?.config ?? {}),
                 ...this.config,
                 ...options,
@@ -685,7 +723,12 @@ export class RufflePlayer extends HTMLElement {
             }
         } catch (e) {
             console.error(`Serious error occurred loading SWF file: ${e}`);
-            throw e;
+            const err = new Error(e as string);
+            if (err.message.includes("Error parsing config")) {
+                err.ruffleIndexError = PanicError.JavascriptConfiguration;
+            }
+            this.panic(err);
+            throw err;
         }
     }
 
@@ -817,6 +860,233 @@ export class RufflePlayer extends HTMLElement {
         }
     }
 
+    private base64ToBlob(bytesBase64: string, mimeString: string): Blob {
+        const byteString = atob(bytesBase64);
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        for (let i = 0; i < byteString.length; i++) {
+            ia[i] = byteString.charCodeAt(i);
+        }
+        const blob = new Blob([ab], { type: mimeString });
+        return blob;
+    }
+
+    /**
+     * Download base-64 string as file
+     *
+     * @param bytesBase64 The base-64 encoded SOL string
+     * @param mimeType The MIME type
+     * @param fileName The name to give the file
+     */
+    private saveFile(
+        bytesBase64: string,
+        mimeType: string,
+        fileName: string
+    ): void {
+        const blob = this.base64ToBlob(bytesBase64, mimeType);
+        const blobURL = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = blobURL;
+        link.style.display = "none";
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobURL);
+    }
+
+    /**
+     * @returns If the string represent a base-64 encoded SOL file
+     * Check if string is a base-64 encoded SOL file
+     * @param solData The base-64 encoded SOL string
+     */
+    private isB64SOL(solData: string): boolean {
+        try {
+            const decodedData = atob(solData);
+            return decodedData.slice(6, 10) === "TCSO";
+        } catch (e) {
+            return false;
+        }
+    }
+
+    private confirmReloadSave(
+        solKey: string,
+        b64SolData: string,
+        replace: boolean
+    ) {
+        if (this.isB64SOL(b64SolData)) {
+            if (localStorage[solKey]) {
+                if (!replace) {
+                    const confirmDelete = confirm(
+                        "Are you sure you want to delete this save file?"
+                    );
+                    if (!confirmDelete) {
+                        return;
+                    }
+                }
+                const swfPath = this.swfUrl ? this.swfUrl.pathname : "";
+                const swfHost = this.swfUrl
+                    ? this.swfUrl.hostname
+                    : document.location.hostname;
+                const savePath = solKey.split("/").slice(1, -1).join("/");
+                if (swfPath.includes(savePath) && solKey.startsWith(swfHost)) {
+                    const confirmReload = confirm(
+                        `The only way to ${
+                            replace ? "replace" : "delete"
+                        } this save file without potential conflict is to reload this content. Do you wish to continue anyway?`
+                    );
+                    if (confirmReload && this.loadedConfig) {
+                        this.destroy();
+                        replace
+                            ? localStorage.setItem(solKey, b64SolData)
+                            : localStorage.removeItem(solKey);
+                        this.load(this.loadedConfig);
+                        this.populateSaves();
+                        this.saveManager.close();
+                    }
+                    return;
+                }
+                replace
+                    ? localStorage.setItem(solKey, b64SolData)
+                    : localStorage.removeItem(solKey);
+                this.populateSaves();
+                this.saveManager.close();
+            }
+        }
+    }
+
+    /**
+     * Replace save from SOL file.
+     *
+     * @param event The change event fired
+     * @param solKey The localStorage save file key
+     */
+    private replaceSOL(event: Event, solKey: string): void {
+        const fileInput = <HTMLInputElement>event.target;
+        const reader = new FileReader();
+        reader.addEventListener("load", () => {
+            if (reader.result && typeof reader.result === "string") {
+                const b64Regex = new RegExp("data:.*;base64,");
+                const b64SolData = reader.result.replace(b64Regex, "");
+                this.confirmReloadSave(solKey, b64SolData, true);
+            }
+        });
+        if (
+            fileInput &&
+            fileInput.files &&
+            fileInput.files.length > 0 &&
+            fileInput.files[0]
+        ) {
+            reader.readAsDataURL(fileInput.files[0]);
+        }
+    }
+
+    /**
+     * Delete local save.
+     *
+     * @param key The key to remove from local storage
+     */
+    private deleteSave(key: string): void {
+        const b64SolData = localStorage.getItem(key);
+        if (b64SolData) {
+            this.confirmReloadSave(key, b64SolData, false);
+        }
+    }
+
+    /**
+     * Puts the local save SOL file keys in a table.
+     */
+    private populateSaves(): void {
+        const saveTable = this.saveManager.querySelector("#local-saves");
+        if (!saveTable) {
+            return;
+        }
+        try {
+            localStorage;
+        } catch (e: unknown) {
+            return;
+        }
+        saveTable.textContent = "";
+        Object.keys(localStorage).forEach((key) => {
+            const solName = key.split("/").pop();
+            const solData = localStorage.getItem(key);
+            if (solName && solData && this.isB64SOL(solData)) {
+                const row = document.createElement("TR");
+                const keyCol = document.createElement("TD");
+                keyCol.textContent = solName;
+                keyCol.title = key;
+                const downloadCol = document.createElement("TD");
+                const downloadSpan = document.createElement("SPAN");
+                downloadSpan.textContent = "Download";
+                downloadSpan.className = "save-option";
+                downloadSpan.addEventListener("click", () =>
+                    this.saveFile(
+                        solData,
+                        "application/octet-stream",
+                        solName + ".sol"
+                    )
+                );
+                downloadCol.appendChild(downloadSpan);
+                const replaceCol = document.createElement("TD");
+                const replaceInput = <HTMLInputElement>(
+                    document.createElement("INPUT")
+                );
+                replaceInput.type = "file";
+                replaceInput.accept = ".sol";
+                replaceInput.className = "replace-save";
+                replaceInput.id = "replace-save-" + key;
+                const replaceLabel = <HTMLLabelElement>(
+                    document.createElement("LABEL")
+                );
+                replaceLabel.htmlFor = "replace-save-" + key;
+                replaceLabel.textContent = "Replace";
+                replaceLabel.className = "save-option";
+                replaceInput.addEventListener("change", (event) =>
+                    this.replaceSOL(event, key)
+                );
+                replaceCol.appendChild(replaceInput);
+                replaceCol.appendChild(replaceLabel);
+                const deleteCol = document.createElement("TD");
+                const deleteSpan = document.createElement("SPAN");
+                deleteSpan.textContent = "Delete";
+                deleteSpan.className = "save-option";
+                deleteSpan.addEventListener("click", () =>
+                    this.deleteSave(key)
+                );
+                deleteCol.appendChild(deleteSpan);
+                row.appendChild(keyCol);
+                row.appendChild(downloadCol);
+                row.appendChild(replaceCol);
+                row.appendChild(deleteCol);
+                saveTable.appendChild(row);
+            }
+        });
+    }
+
+    /**
+     * Gets the local save information as SOL files and downloads them.
+     */
+    private backupSaves(): void {
+        Object.keys(localStorage).forEach((key) => {
+            const solName = key.split("/").pop();
+            const solData = localStorage.getItem(key);
+            if (solData && this.isB64SOL(solData)) {
+                this.saveFile(
+                    solData,
+                    "application/octet-stream",
+                    solName + ".sol"
+                );
+            }
+        });
+    }
+
+    /**
+     * Opens the save manager.
+     */
+    private openSaveManager(): void {
+        this.saveManager.showModal();
+    }
+
     /**
      * Fetches the loaded SWF and downloads it.
      */
@@ -937,6 +1207,14 @@ export class RufflePlayer extends HTMLElement {
                 text: "Copy debug info",
                 onClick: () =>
                     navigator.clipboard.writeText(this.getPanicData()),
+            });
+        }
+        this.populateSaves();
+        const localSaveTable = this.saveManager.querySelector("#local-saves");
+        if (localSaveTable && localSaveTable.textContent !== "") {
+            items.push({
+                text: "Open Save Manager",
+                onClick: this.openSaveManager.bind(this),
             });
         }
 

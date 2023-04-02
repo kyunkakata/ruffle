@@ -275,12 +275,68 @@ ruffleShadowTemplate.innerHTML = `
                 transform: rotate(360deg);
             }
         }
+
         #virtual-keyboard {
             position: absolute;
             opacity: 0;
             top: -100px;
             width: 1px;
             height: 1px;
+        }
+
+        #modal-area {
+            width: 100%;
+            height: 100%;
+        }
+
+        #restore-save {
+            display: none;
+        }
+
+        .replace-save {
+            display: none;
+        }
+
+        .save-option {
+            display: inline-block;
+            padding: 3px 10px;
+            margin: 5px 2px;
+            cursor: pointer;
+            border-radius: 50px;
+            background-color: var(--ruffle-blue);
+            color: white;
+        }
+
+        #close-modal {
+            position: absolute;
+            top: 5px;
+            right: 10px;
+            cursor: pointer;
+            font-size: x-large;
+        }
+
+        .general-save-options {
+            text-align: center;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #888;
+        }
+
+        #local-saves {
+            border-collapse: collapse;
+        }
+
+        #local-saves td {
+            border-bottom: 1px solid #bbb;
+            height: 30px;
+        }
+
+        #local-saves tr td:nth-child(1) {
+            padding-right: 1em;
+            word-break: break-all;
+        }
+
+        #local-saves tr:nth-child(even) {
+            background-color: #f2f2f2;
         }
     </style>
     <style id="dynamic_styles"></style>
@@ -298,5 +354,14 @@ ruffleShadowTemplate.innerHTML = `
         <div class="loadbar"><div class="loadbar-inner"></div></div>
     </div>
 
+    <dialog id="save-manager">
+        <div id="modal-area">
+            <span id="close-modal">&times;</span>
+            <div class="general-save-options">
+                <span class="save-option" id="backup-saves">Backup all saves (download all sols)</span>
+            </div>
+            <table id="local-saves"></table>
+        </div>
+    </dialog>
     <ul id="context-menu"></ul>
 `;

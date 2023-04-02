@@ -12,8 +12,7 @@ use crate::avm2_stub_method;
 use crate::display_object::TDisplayObject;
 use crate::drawing::Drawing;
 use crate::string::{AvmString, WStr};
-use ruffle_render::shape_utils::DrawCommand;
-use ruffle_render::tessellator::GradientType;
+use ruffle_render::shape_utils::{DrawCommand, GradientType};
 use std::f64::consts::FRAC_1_SQRT_2;
 use swf::{
     Color, FillStyle, Fixed16, Fixed8, Gradient, GradientInterpolation, GradientRecord,
@@ -53,7 +52,7 @@ pub fn begin_bitmap_fill<'gc>(
     if let Some(this) = this.and_then(|t| t.as_display_object()) {
         let bitmap = args
             .get_object(activation, 0, "bitmap")?
-            .as_bitmap_data()
+            .as_bitmap_data_wrapper()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(activation, 1) {
             Matrix::from(object_to_matrix(matrix, activation)?)
@@ -64,19 +63,13 @@ pub fn begin_bitmap_fill<'gc>(
         let is_repeating = args.get_bool(2);
         let is_smoothed = args.get_bool(3);
 
-        let handle = if let Some(handle) = bitmap
-            .write(activation.context.gc_context)
-            .bitmap_handle(activation.context.renderer)
-        {
-            handle
-        } else {
-            return Ok(Value::Undefined);
-        };
+        let handle =
+            bitmap.bitmap_handle(activation.context.gc_context, activation.context.renderer);
 
         let bitmap = ruffle_render::bitmap::BitmapInfo {
             handle,
-            width: bitmap.read().width() as u16,
-            height: bitmap.read().height() as u16,
+            width: bitmap.width() as u16,
+            height: bitmap.height() as u16,
         };
         let scale_matrix = Matrix::scale(
             Fixed16::from_f64(bitmap.width as f64),
@@ -897,7 +890,7 @@ pub fn line_bitmap_style<'gc>(
     if let Some(this) = this.and_then(|t| t.as_display_object()) {
         let bitmap = args
             .get_object(activation, 0, "bitmap")?
-            .as_bitmap_data()
+            .as_bitmap_data_wrapper()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(activation, 1) {
             Matrix::from(object_to_matrix(matrix, activation)?)
@@ -908,19 +901,13 @@ pub fn line_bitmap_style<'gc>(
         let is_repeating = args.get_bool(2);
         let is_smoothed = args.get_bool(3);
 
-        let handle = if let Some(handle) = bitmap
-            .write(activation.context.gc_context)
-            .bitmap_handle(activation.context.renderer)
-        {
-            handle
-        } else {
-            return Ok(Value::Undefined);
-        };
+        let handle =
+            bitmap.bitmap_handle(activation.context.gc_context, activation.context.renderer);
 
         let bitmap = ruffle_render::bitmap::BitmapInfo {
             handle,
-            width: bitmap.read().width() as u16,
-            height: bitmap.read().height() as u16,
+            width: bitmap.width() as u16,
+            height: bitmap.height() as u16,
         };
         let scale_matrix = Matrix::scale(
             Fixed16::from_f64(bitmap.width as f64),

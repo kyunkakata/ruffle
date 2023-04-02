@@ -124,7 +124,7 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
     ) -> bool {
         if self.world_bounds().contains(point) {
             if let Some(frame) = self.0.read().static_data.frames.borrow().get(&self.ratio()) {
-                let local_matrix = self.global_to_local_matrix();
+                let Some(local_matrix) = self.global_to_local_matrix() else { return false; };
                 let point = local_matrix * point;
                 return ruffle_render::shape_utils::shape_hit_test(
                     &frame.shape,
@@ -194,7 +194,7 @@ impl MorphShapeStatic {
         ratio: u16,
     ) -> ShapeHandle {
         let mut frame = self.get_frame(ratio);
-        if let Some(handle) = frame.shape_handle {
+        if let Some(handle) = frame.shape_handle.clone() {
             handle
         } else {
             let library = library.library_for_movie(self.movie.clone()).unwrap();
@@ -205,7 +205,7 @@ impl MorphShapeStatic {
                     gc_context: context.gc_context,
                 },
             );
-            frame.shape_handle = Some(handle);
+            frame.shape_handle = Some(handle.clone());
             handle
         }
     }
