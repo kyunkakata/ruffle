@@ -690,6 +690,19 @@ impl Ruffle {
                             _ => MouseButton::Unknown,
                         },
                     };
+
+                    // Fix issue with touch events on mobile devices
+                    // when the game is base on move events to calculate.
+                    if js_event.pointer_type() == "touch" || js_event.pointer_type() == "pen" {
+                        let move_event = PlayerEvent::MouseMove {
+                            x: f64::from(js_event.offset_x()) * instance.device_pixel_ratio,
+                            y: f64::from(js_event.offset_y()) * instance.device_pixel_ratio,
+                        };
+                        let _ = instance.with_core_mut(|core| {
+                            core.handle_event(move_event);
+                        });
+                    }
+
                     let _ = instance.with_core_mut(|core| {
                         core.handle_event(event);
                     });
