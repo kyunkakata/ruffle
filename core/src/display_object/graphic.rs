@@ -201,8 +201,12 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         options: HitTestOptions,
     ) -> bool {
         // Transform point to local coordinates and test.
+
+        let world_bounds = self.world_bounds();
         if (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
-            && self.world_bounds().contains(point)
+            && world_bounds.width() > Twips::ZERO
+            && world_bounds.height() > Twips::ZERO
+            && world_bounds.contains(point)
         {
             let Some(local_matrix) = self.global_to_local_matrix() else { return false; };
             let point = local_matrix * point;
