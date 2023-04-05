@@ -58,18 +58,13 @@ pub trait RenderBackend: Downcast {
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error>;
     fn update_texture(
         &mut self,
-        bitmap: &BitmapHandle,
-        rgba: Vec<u8>,
+        handle: &BitmapHandle,
+        bitmap: Bitmap,
         region: PixelRegion,
     ) -> Result<(), Error>;
 
     fn create_context3d(&mut self) -> Result<Box<dyn Context3D>, Error>;
-    fn context3d_present<'gc>(
-        &mut self,
-        context: &mut dyn Context3D,
-        commands: Vec<Context3DCommand<'gc>>,
-        mc: MutationContext<'gc, '_>,
-    ) -> Result<(), Error>;
+    fn context3d_present(&mut self, context: &mut dyn Context3D) -> Result<(), Error>;
 
     fn debug_info(&self) -> Cow<'static, str>;
 
@@ -214,6 +209,12 @@ pub trait Context3D: Collect + Downcast {
         optimize_for_render_to_texture: bool,
         streaming_levels: u32,
     ) -> Result<Rc<dyn Texture>, Error>;
+
+    fn process_command<'gc>(
+        &mut self,
+        command: Context3DCommand<'gc>,
+        mc: MutationContext<'gc, '_>,
+    );
 }
 impl_downcast!(Context3D);
 
