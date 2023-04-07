@@ -485,6 +485,30 @@ impl<'gc> Context3DObject<'gc> {
             )
     }
 
+    pub(crate) fn set_color_mask(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        red: bool,
+        green: bool,
+        blue: bool,
+        alpha: bool,
+    ) {
+        self.0
+            .write(activation.context.gc_context)
+            .render_context
+            .as_mut()
+            .unwrap()
+            .process_command(
+                Context3DCommand::SetColorMask {
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                },
+                activation.context.gc_context,
+            );
+    }
+
     pub(crate) fn set_depth_test(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -532,6 +556,28 @@ impl<'gc> Context3DObject<'gc> {
         Ok(Value::Object(TextureObject::from_handle(
             activation, *self, texture, class,
         )?))
+    }
+
+    pub(crate) fn set_sampler_state_at(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        sampler: u32,
+        wrap: ruffle_render::backend::Context3DWrapMode,
+        filter: ruffle_render::backend::Context3DTextureFilter,
+    ) {
+        self.0
+            .write(activation.context.gc_context)
+            .render_context
+            .as_mut()
+            .unwrap()
+            .process_command(
+                Context3DCommand::SetSamplerStateAt {
+                    sampler,
+                    wrap,
+                    filter,
+                },
+                activation.context.gc_context,
+            )
     }
 }
 
