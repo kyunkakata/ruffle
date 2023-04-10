@@ -5,7 +5,7 @@ use crate::avm1::error::Error;
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Attribute, Object, ScriptObject, TObject, Value};
-use gc_arena::{GcCell, MutationContext};
+use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "clone" => method(clone);
@@ -25,14 +25,21 @@ pub fn clone<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let native = match this.native() {
-        NativeObject::BlurFilter(blur_filter) => NativeObject::BlurFilter(GcCell::allocate(
-            activation.context.gc_context,
-            blur_filter.read().clone(),
-        )),
-        NativeObject::BevelFilter(bevel_filter) => NativeObject::BevelFilter(GcCell::allocate(
-            activation.context.gc_context,
-            bevel_filter.read().clone(),
-        )),
+        NativeObject::BlurFilter(blur_filter) => {
+            NativeObject::BlurFilter(blur_filter.duplicate(activation.context.gc_context))
+        }
+        NativeObject::BevelFilter(bevel_filter) => {
+            NativeObject::BevelFilter(bevel_filter.duplicate(activation.context.gc_context))
+        }
+        NativeObject::GlowFilter(glow_filter) => {
+            NativeObject::GlowFilter(glow_filter.duplicate(activation.context.gc_context))
+        }
+        NativeObject::DropShadowFilter(drop_shadow_filter) => NativeObject::DropShadowFilter(
+            drop_shadow_filter.duplicate(activation.context.gc_context),
+        ),
+        NativeObject::ColorMatrixFilter(color_matrix_filter) => NativeObject::ColorMatrixFilter(
+            color_matrix_filter.duplicate(activation.context.gc_context),
+        ),
         _ => NativeObject::None,
     };
     if !matches!(native, NativeObject::None) {
@@ -50,75 +57,6 @@ pub fn clone<'gc>(
         }
         cloned.set_native(activation.context.gc_context, native);
         return Ok(cloned.into());
-    }
-
-    if let Some(this) = this.as_glow_filter_object() {
-        let proto = activation.context.avm1.prototypes().glow_filter_constructor;
-
-        let color = this.get("color", activation)?;
-        let alpha = this.get("alpha", activation)?;
-        let blur_x = this.get("blurX", activation)?;
-        let blur_y = this.get("blurY", activation)?;
-        let strength = this.get("strength", activation)?;
-        let quality = this.get("quality", activation)?;
-
-        let cloned = proto.construct(
-            activation,
-            &[color, alpha, blur_x, blur_y, strength, quality],
-        )?;
-        return Ok(cloned);
-    }
-
-    if let Some(this) = this.as_drop_shadow_filter_object() {
-        let proto = activation
-            .context
-            .avm1
-            .prototypes()
-            .drop_shadow_filter_constructor;
-
-        let distance = this.get("distance", activation)?;
-        let angle = this.get("angle", activation)?;
-        let color = this.get("color", activation)?;
-        let alpha = this.get("alpha", activation)?;
-        let blur_x = this.get("blurX", activation)?;
-        let blur_y = this.get("blurY", activation)?;
-        let strength = this.get("strength", activation)?;
-        let quality = this.get("quality", activation)?;
-        let inner = this.get("inner", activation)?;
-        let knockout = this.get("knockout", activation)?;
-        let hide_object = this.get("hide_object", activation)?;
-
-        let cloned = proto.construct(
-            activation,
-            &[
-                distance,
-                angle,
-                color,
-                alpha,
-                blur_x,
-                blur_y,
-                strength,
-                quality,
-                inner,
-                knockout,
-                hide_object,
-            ],
-        )?;
-        return Ok(cloned);
-    }
-
-    if let Some(this) = this.as_color_matrix_filter_object() {
-        let proto = activation
-            .context
-            .avm1
-            .prototypes()
-            .color_matrix_filter_constructor;
-
-        let matrix = this.get("matrix", activation)?;
-
-        let cloned = proto.construct(activation, &[matrix])?;
-
-        return Ok(cloned);
     }
 
     if let Some(this) = this.as_displacement_map_filter_object() {
