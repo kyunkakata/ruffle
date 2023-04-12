@@ -1,11 +1,12 @@
 import type { Options } from "./common";
-import type { LogLevel } from "ruffle-core";
+import type { LogLevel, RenderBackend } from "ruffle-core";
 
 const DEFAULT_OPTIONS: Options = {
     ruffleEnable: true,
     ignoreOptout: false,
     warnOnUnsupportedContent: true,
     logLevel: "error" as LogLevel,
+    preferredRenderer: "webgpu" as RenderBackend,
     showSwfDownload: false,
 };
 

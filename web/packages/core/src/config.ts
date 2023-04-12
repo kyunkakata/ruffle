@@ -34,4 +34,5 @@ export const DEFAULT_CONFIG: Required<BaseLoadOptions> = {
     publicPath: null,
     polyfills: true,
     playerVersion: null,
+    preferredRenderer: null,
 };
