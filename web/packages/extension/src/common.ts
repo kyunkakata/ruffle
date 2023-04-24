@@ -1,7 +1,7 @@
 import * as utils from "./utils";
-import type { LogLevel, RenderBackend } from "ruffle-core";
+import type { LogLevel, RenderBackend, BaseLoadOptions } from "ruffle-core";
 
-export interface Options {
+export interface Options extends BaseLoadOptions {
     ruffleEnable: boolean;
     ignoreOptout: boolean;
     warnOnUnsupportedContent: boolean;
