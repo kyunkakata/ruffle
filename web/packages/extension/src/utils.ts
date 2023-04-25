@@ -1,7 +1,9 @@
 import type { Options } from "./common";
 import type { LogLevel, RenderBackend } from "ruffle-core";
+import { DEFAULT_CONFIG as CORE_DEFAULT_CONFIG } from "ruffle-core";
 
-const DEFAULT_OPTIONS: Options = {
+const DEFAULT_OPTIONS: Required<Options> = {
+    ...CORE_DEFAULT_CONFIG,
     ruffleEnable: true,
     ignoreOptout: false,
     warnOnUnsupportedContent: true,
