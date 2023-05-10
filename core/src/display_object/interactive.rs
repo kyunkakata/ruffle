@@ -168,11 +168,7 @@ pub trait TInteractiveObject<'gc>:
     /// machinery should run. Otherwise, the event will not be handled, neither
     /// by this interactive object nor it's children. The event will be passed
     /// onto other siblings of the display object instead.
-    fn filter_clip_event(
-        self,
-        _context: &mut UpdateContext<'_, 'gc>,
-        event: ClipEvent,
-    ) -> ClipEventResult;
+    fn filter_clip_event(self, event: ClipEvent) -> ClipEventResult;
 
     /// Propagate the event to children.
     ///
@@ -428,7 +424,7 @@ pub trait TInteractiveObject<'gc>:
             return ClipEventResult::NotHandled;
         }
 
-        if self.filter_clip_event(context, event) == ClipEventResult::NotHandled {
+        if self.filter_clip_event(event) == ClipEventResult::NotHandled {
             return ClipEventResult::NotHandled;
         }
 

@@ -867,11 +867,7 @@ impl<'gc> TInteractiveObject<'gc> for Stage<'gc> {
         self.into()
     }
 
-    fn filter_clip_event(
-        self,
-        _context: &mut UpdateContext<'_, 'gc>,
-        _event: ClipEvent,
-    ) -> ClipEventResult {
+    fn filter_clip_event(self, _event: ClipEvent) -> ClipEventResult {
         ClipEventResult::Handled
     }
 

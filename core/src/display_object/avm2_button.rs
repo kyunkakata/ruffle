@@ -703,11 +703,7 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
         self.into()
     }
 
-    fn filter_clip_event(
-        self,
-        _context: &mut UpdateContext<'_, 'gc>,
-        event: ClipEvent,
-    ) -> ClipEventResult {
+    fn filter_clip_event(self, event: ClipEvent) -> ClipEventResult {
         if !self.visible() {
             return ClipEventResult::NotHandled;
         }
