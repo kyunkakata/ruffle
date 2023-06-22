@@ -34,7 +34,7 @@ use std::time::Duration;
 use std::{cell::RefCell, error::Error, num::NonZeroI32};
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::registry::Registry;
-use tracing_wasm::{WASMLayer, WASMLayerConfigBuilder};
+use tracing_wasm::{ConsoleConfig, WASMLayer, WASMLayerConfigBuilder};
 use url::Url;
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use web_sys::{
@@ -704,6 +704,19 @@ impl Ruffle {
                         core.handle_event(PlayerEvent::MouseLeave);
                     });
                 });
+                // Fix issue with touch events on mobile devices
+                // when the game is base on move events to calculate.
+                if _js_event.pointer_type() == "touch" || _js_event.pointer_type() == "pen" {
+                    let _ = ruffle.with_instance(move |instance| {
+                        let move_event = PlayerEvent::MouseMove {
+                            x: f64::from(_js_event.offset_x()) * instance.device_pixel_ratio,
+                            y: f64::from(_js_event.offset_y()) * instance.device_pixel_ratio,
+                        };
+                        let _ = instance.with_core_mut(|core| {
+                            core.handle_event(move_event);
+                        });
+                    });
+                }
             });
 
             canvas
