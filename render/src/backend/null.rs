@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::backend::{RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions};
+use crate::backend::{
+    BitmapCacheEntry, RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions,
+};
 use crate::bitmap::{
     Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSize, BitmapSource, PixelRegion, SyncHandle,
 };
@@ -68,7 +70,13 @@ impl RenderBackend for NullRenderer {
         None
     }
 
-    fn submit_frame(&mut self, _clear: Color, _commands: CommandList) {}
+    fn submit_frame(
+        &mut self,
+        _clear: Color,
+        _commands: CommandList,
+        _cache_entries: Vec<BitmapCacheEntry>,
+    ) {
+    }
     fn register_bitmap(&mut self, _bitmap: Bitmap) -> Result<BitmapHandle, Error> {
         Ok(BitmapHandle(Arc::new(NullBitmapHandle)))
     }
@@ -116,5 +124,9 @@ impl RenderBackend for NullRenderer {
         Err(Error::Unimplemented(
             "Pixel bender shader compilation".into(),
         ))
+    }
+
+    fn create_empty_texture(&mut self, _width: u32, _height: u32) -> Result<BitmapHandle, Error> {
+        Ok(BitmapHandle(Arc::new(NullBitmapHandle)))
     }
 }

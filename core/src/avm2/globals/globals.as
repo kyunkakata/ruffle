@@ -57,7 +57,6 @@ include "flash/display/BlendMode.as"
 include "flash/display/CapsStyle.as"
 include "flash/display/ColorCorrection.as"
 include "flash/display/ColorCorrectionSupport.as"
-include "flash/display/FocusDirection.as"
 include "flash/display/FrameLabel.as"
 include "flash/display/GradientType.as"
 include "flash/display/IGraphicsStroke.as"
@@ -275,12 +274,18 @@ include "flash/net/URLStream.as"
 include "flash/net/URLVariables.as"
 include "flash/net/XMLSocket.as"
 
-include "flash/profiler/Telemetry.as"
 include "flash/printing/PrintJob.as"
-include "flash/printing/PrintJobOrientation.as"
 include "flash/printing/PrintJobOptions.as"
+include "flash/printing/PrintJobOrientation.as"
 
 include "flash/profiler.as"
+include "flash/profiler/Telemetry.as"
+
+include "flash/sampler.as"
+include "flash/sampler/Sample.as"
+include "flash/sampler/DeleteObjectSample.as" // DeleteObjectSample and NewObjectSample extend Sample
+include "flash/sampler/NewObjectSample.as"
+include "flash/sampler/StackFrame.as"
 
 include "flash/security/CertificateStatus.as"
 include "flash/security/X509Certificate.as"

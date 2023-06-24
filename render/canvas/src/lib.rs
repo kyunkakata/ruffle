@@ -1,7 +1,7 @@
 #![deny(clippy::unwrap_used)]
 
 use ruffle_render::backend::{
-    Context3D, RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions,
+    BitmapCacheEntry, Context3D, RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions,
 };
 use ruffle_render::bitmap::{
     Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSource, PixelRegion, SyncHandle,
@@ -160,6 +160,11 @@ impl BitmapData {
         let image_data =
             ImageData::new_with_u8_clamped_array(Clamped(bitmap.data()), bitmap.width())
                 .into_js_result()?;
+        Self::with_image_data(image_data)
+    }
+
+    fn empty(width: u32, height: u32) -> Result<Self, JsValue> {
+        let image_data = ImageData::new_with_sw(width, height).into_js_result()?;
         Self::with_image_data(image_data)
     }
 
@@ -451,7 +456,15 @@ impl RenderBackend for WebCanvasRenderBackend {
         None
     }
 
-    fn submit_frame(&mut self, clear: Color, commands: CommandList) {
+    fn submit_frame(
+        &mut self,
+        clear: Color,
+        commands: CommandList,
+        cache_entries: Vec<BitmapCacheEntry>,
+    ) {
+        if !cache_entries.is_empty() {
+            panic!("Bitmap caching is unavailable on the canvas backend");
+        }
         self.begin_frame(clear);
         commands.execute(self);
     }
@@ -503,6 +516,11 @@ impl RenderBackend for WebCanvasRenderBackend {
         _target: BitmapHandle,
     ) -> Result<Box<dyn SyncHandle>, Error> {
         Err(Error::Unimplemented("run_pixelbender_shader".into()))
+    }
+
+    fn create_empty_texture(&mut self, width: u32, height: u32) -> Result<BitmapHandle, Error> {
+        let bitmap_data = BitmapData::empty(width, height).map_err(Error::JavascriptError)?;
+        Ok(BitmapHandle(Arc::new(bitmap_data)))
     }
 }
 

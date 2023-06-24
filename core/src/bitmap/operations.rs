@@ -1454,13 +1454,16 @@ pub fn draw<'gc>(
     let mut transform_stack = ruffle_render::transform::TransformStack::new();
     transform_stack.push(&transform);
 
+    let mut cache_draws = vec![];
     let mut render_context = RenderContext {
         renderer: context.renderer,
         commands: CommandList::new(),
+        cache_draws: &mut cache_draws,
         gc_context: context.gc_context,
         library: context.library,
         transform_stack: &mut transform_stack,
         is_offscreen: true,
+        use_bitmap_cache: false,
         stage: context.stage,
     };
 
@@ -1526,6 +1529,10 @@ pub fn draw<'gc>(
         dirty_region.union(old);
     }
 
+    assert!(
+        cache_draws.is_empty(),
+        "BitmapData.draw() should not use cacheAsBitmap"
+    );
     let image = context
         .renderer
         .render_offscreen(handle, commands, quality, dirty_region);

@@ -108,6 +108,8 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
     "unloadMovie" => method(mc_method!(unload_movie); DONT_ENUM | DONT_DELETE);
 
     "blendMode" => property(mc_getter!(blend_mode), mc_setter!(set_blend_mode); DONT_DELETE | DONT_ENUM | VERSION_8);
+    "cacheAsBitmap" => property(mc_getter!(cache_as_bitmap), mc_setter!(set_cache_as_bitmap); DONT_DELETE | DONT_ENUM | VERSION_8);
+    "opaqueBackground" => property(mc_getter!(opaque_background), mc_setter!(set_opaque_background); DONT_DELETE | DONT_ENUM | VERSION_8);
     "enabled" => bool(true; DONT_ENUM);
     "_lockroot" => property(mc_getter!(lock_root), mc_setter!(set_lock_root); DONT_DELETE | DONT_ENUM);
     "scrollRect" => property(mc_getter!(scroll_rect), mc_setter!(set_scroll_rect); DONT_DELETE | DONT_ENUM | VERSION_8);
@@ -1608,6 +1610,12 @@ fn set_transform<'gc>(
                 let color_transform = *clip.base().color_transform();
                 this.set_color_transform(activation.context.gc_context, color_transform);
 
+                if let Some(parent) = this.parent() {
+                    // Self-transform changes are automatically handled,
+                    // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
+                    parent.invalidate_cached_bitmap(activation.context.gc_context);
+                }
+
                 this.set_transformed_by_script(activation.context.gc_context, true);
             }
         }
@@ -1651,6 +1659,54 @@ fn set_blend_mode<'gc>(
         this.set_blend_mode(activation.context.gc_context, mode);
     } else {
         tracing::error!("Unknown blend mode {value:?}");
+    }
+    Ok(())
+}
+
+fn cache_as_bitmap<'gc>(
+    this: MovieClip<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    // Note that the *getter* returns actual, and *setter* is preference
+    Ok(this.is_bitmap_cached().into())
+}
+
+fn set_cache_as_bitmap<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    // Note that the *getter* returns actual, and *setter* is preference
+    this.set_bitmap_cached_preference(
+        activation.context.gc_context,
+        value.as_bool(activation.swf_version()),
+    );
+    Ok(())
+}
+
+fn opaque_background<'gc>(
+    this: MovieClip<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(color) = this.opaque_background() {
+        Ok(color.to_rgb().into())
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn set_opaque_background<'gc>(
+    this: MovieClip<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    if matches!(value, Value::Undefined | Value::Null) {
+        this.set_opaque_background(activation.context.gc_context, None);
+    } else {
+        this.set_opaque_background(
+            activation.context.gc_context,
+            Some(Color::from_rgb(value.coerce_to_u32(activation)?, 255)),
+        );
     }
     Ok(())
 }

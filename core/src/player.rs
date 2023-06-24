@@ -1544,17 +1544,20 @@ impl Player {
 
         let mut background_color = Color::WHITE;
 
-        let commands = self.gc_arena.borrow().mutate(|gc_context, gc_root| {
+        let (cache_draws, commands) = self.gc_arena.borrow().mutate(|gc_context, gc_root| {
             let root_data = gc_root.data.read();
             let stage = root_data.stage;
 
+            let mut cache_draws = vec![];
             let mut render_context = RenderContext {
                 renderer: self.renderer.deref_mut(),
                 commands: CommandList::new(),
+                cache_draws: &mut cache_draws,
                 gc_context,
                 library: &root_data.library,
                 transform_stack: &mut self.transform_stack,
                 is_offscreen: false,
+                use_bitmap_cache: true,
                 stage,
             };
 
@@ -1575,10 +1578,12 @@ impl Player {
                     Color::from_rgba(0)
                 };
 
-            render_context.commands
+            let commands = render_context.commands;
+            (cache_draws, commands)
         });
 
-        self.renderer.submit_frame(background_color, commands);
+        self.renderer
+            .submit_frame(background_color, commands, cache_draws);
 
         self.needs_render = false;
     }
@@ -1870,8 +1875,8 @@ impl Player {
     }
 
     #[cfg(feature = "egui")]
-    pub fn debug_ui_message(&mut self, message: crate::debug_ui::Message) {
-        self.debug_ui.borrow_mut().queue_message(message)
+    pub fn debug_ui(&mut self) -> core::cell::RefMut<'_, crate::debug_ui::DebugUi> {
+        self.debug_ui.borrow_mut()
     }
 
     /// Update the current state of the player.

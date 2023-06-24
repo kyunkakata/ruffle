@@ -227,6 +227,8 @@ impl<'gc> Avm2Button<'gc> {
             }
         }
 
+        self.invalidate_cached_bitmap(context.gc_context);
+
         // We manually call `construct_frame` for `child` and `state_sprite` - normally
         // this would be done in the `DisplayObject` constructor, but SimpleButton does
         // not have children in the normal DisplayObjectContainer sense.
@@ -617,7 +619,8 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         // Add the bounds of the child, dictated by current state
         let state = self.0.read().state;
         if let Some(child) = self.get_state_child(state.into()) {
-            let child_bounds = child.bounds_with_transform(matrix);
+            let matrix = *matrix * *child.base().matrix();
+            let child_bounds = child.bounds_with_transform(&matrix);
             bounds = bounds.union(&child_bounds);
         }
 

@@ -1980,7 +1980,11 @@ impl<'gc> MovieClip<'gc> {
                     if let Some(init_object) = init_object {
                         // AVM1 sets keys in reverse order (compared to enumeration order).
                         // This behavior is visible to setters, and some SWFs depend on it.
-                        for key in init_object.get_keys(&mut activation).into_iter().rev() {
+                        for key in init_object
+                            .get_keys(&mut activation, false)
+                            .into_iter()
+                            .rev()
+                        {
                             if let Ok(value) = init_object.get(key, &mut activation) {
                                 let _ = object.set(key, value, &mut activation);
                             }
@@ -2011,7 +2015,7 @@ impl<'gc> MovieClip<'gc> {
                     self.into(),
                 );
 
-                for key in init_object.get_keys(&mut activation) {
+                for key in init_object.get_keys(&mut activation, false) {
                     if let Ok(value) = init_object.get(key, &mut activation) {
                         let _ = object.set(key, value, &mut activation);
                     }
@@ -2281,6 +2285,8 @@ impl<'gc> MovieClip<'gc> {
     }
 
     pub fn drawing(&self, gc_context: MutationContext<'gc, '_>) -> RefMut<'_, Drawing> {
+        // We're about to change graphics, so invalidate on the next frame
+        self.invalidate_cached_bitmap(gc_context);
         RefMut::map(self.0.write(gc_context), |s| &mut s.drawing)
     }
 
@@ -3833,19 +3839,25 @@ impl<'gc, 'a> MovieClipData<'gc> {
         for export in exports {
             let name = export.name.decode(reader.encoding());
             let name = AvmString::new(context.gc_context, name);
-            let character = context
-                .library
-                .library_for_movie_mut(self.movie())
-                .register_export(export.id, name);
+            let library = context.library.library_for_movie_mut(self.movie());
+            library.register_export(export.id, name);
 
             // TODO: do other types of Character need to know their exported name?
-            if let Some(Character::MovieClip(movie_clip)) = character {
-                *movie_clip
-                    .0
-                    .read()
-                    .static_data
-                    .exported_name
-                    .write(context.gc_context) = Some(name);
+            if let Some(character) = library.character_by_id(export.id) {
+                if let Character::MovieClip(movie_clip) = character {
+                    *movie_clip
+                        .0
+                        .read()
+                        .static_data
+                        .exported_name
+                        .write(context.gc_context) = Some(name);
+                }
+            } else {
+                tracing::warn!(
+                    "Can't register export {}: Character ID {} doesn't exist",
+                    name,
+                    export.id,
+                );
             }
         }
         Ok(())
