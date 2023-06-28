@@ -768,6 +768,7 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
                 handle: handle.clone(),
                 commands: offscreen_context.commands,
                 clear: this.opaque_background().unwrap_or_default(),
+                filters: this.filters(),
             });
         }
 
@@ -1911,11 +1912,16 @@ pub trait TDisplayObject<'gc>:
                     self.set_opaque_background(context.gc_context, color);
                 }
             }
+            if let Some(filters) = &place_object.filters {
+                self.set_filters(
+                    context.gc_context,
+                    filters.iter().map(Filter::from).collect(),
+                );
+            }
             // Purposely omitted properties:
             // name, clip_depth, clip_actions
             // These properties are only set on initial placement in `MovieClip::instantiate_child`
             // and can not be modified by subsequent PlaceObject tags.
-            // TODO: Filters need to be applied here.
         }
     }
 

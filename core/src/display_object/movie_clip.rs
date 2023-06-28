@@ -37,7 +37,6 @@ use crate::tag_utils::{self, ControlFlow, DecodeResult, Error, SwfMovie, SwfSlic
 use crate::vminterface::{AvmObject, Instantiator};
 use core::fmt;
 use gc_arena::{Collect, Gc, GcCell, GcWeakCell, MutationContext};
-use ruffle_render::filters::Filter;
 use smallvec::SmallVec;
 use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
@@ -1573,12 +1572,6 @@ impl<'gc> MovieClip<'gc> {
                                 .cloned()
                                 .map(|a| ClipEventHandler::from_action_and_movie(a, movie.clone()))
                                 .collect(),
-                        );
-                    }
-                    if let Some(filters) = &place_object.filters {
-                        child.set_filters(
-                            context.gc_context,
-                            filters.iter().map(Filter::from).collect(),
                         );
                     }
                     // TODO: Missing PlaceObject property: amf_data
@@ -4351,13 +4344,14 @@ impl<'a> GotoPlaceObject<'a> {
                 if place_object.background_color.is_none() {
                     place_object.background_color = Some(Color::from_rgba(0));
                 }
+                if place_object.filters.is_none() {
+                    place_object.filters = Some(Default::default());
+                }
                 // Purposely omitted properties:
                 // name, clip_depth, clip_actions, amf_data
                 // These properties are only set on initial placement in `MovieClip::instantiate_child`
                 // and can not be modified by subsequent PlaceObject tags.
                 // Also, is_visible flag persists during rewind unlike all other properties.
-                // TODO: Filters need to be applied here. Rewinding will erase filters if initial
-                // PlaceObject tag has none.
             }
         }
 
@@ -4409,11 +4403,13 @@ impl<'a> GotoPlaceObject<'a> {
         if next_place.background_color.is_some() {
             cur_place.background_color = next_place.background_color.take();
         }
+        if next_place.filters.is_some() {
+            cur_place.filters = next_place.filters.take();
+        }
         // Purposely omitted properties:
         // name, clip_depth, clip_actions, amf_data
         // These properties are only set on initial placement in `MovieClip::instantiate_child`
         // and can not be modified by subsequent PlaceObject tags.
-        // TODO: Filters need to be applied here. New filters will overwrite old filters.
     }
 }
 
