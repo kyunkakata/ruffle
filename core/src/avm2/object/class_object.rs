@@ -436,7 +436,7 @@ impl<'gc> ClassObject<'gc> {
                 .write(activation.context.gc_context)
                 .mark_class_initialized();
 
-            class_init_fn.call(Some(object), &[], activation)?;
+            class_init_fn.call(object.into(), &[], activation)?;
         }
 
         Ok(())
@@ -492,7 +492,7 @@ impl<'gc> ClassObject<'gc> {
     /// Call the instance initializer.
     pub fn call_init(
         self,
-        receiver: Option<Object<'gc>>,
+        receiver: Value<'gc>,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -510,7 +510,7 @@ impl<'gc> ClassObject<'gc> {
     /// classes that cannot be constructed but can be supercalled).
     pub fn call_native_init(
         self,
-        receiver: Option<Object<'gc>>,
+        receiver: Value<'gc>,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -574,7 +574,7 @@ impl<'gc> ClassObject<'gc> {
             let callee =
                 FunctionObject::from_method(activation, method, scope, Some(receiver), Some(class));
 
-            callee.call(Some(receiver), arguments, activation)
+            callee.call(receiver.into(), arguments, activation)
         } else {
             receiver.call_property(multiname, arguments, activation)
         }
@@ -635,7 +635,7 @@ impl<'gc> ClassObject<'gc> {
 
                 // We call getters, but return the actual function object for normal methods
                 if matches!(property, Some(Property::Virtual { .. })) {
-                    callee.call(Some(receiver), &[], activation)
+                    callee.call(receiver.into(), &[], activation)
                 } else {
                     Ok(callee.into())
                 }
@@ -710,7 +710,7 @@ impl<'gc> ClassObject<'gc> {
                 let callee =
                     FunctionObject::from_method(activation, method, scope, Some(receiver), Some(class));
 
-                callee.call(Some(receiver), &[value], activation)?;
+                callee.call(receiver.into(), &[value], activation)?;
                 Ok(())
             }
             Some(Property::Slot { .. }) => {
@@ -837,7 +837,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
     fn call(
         self,
-        receiver: Option<Object<'gc>>,
+        receiver: Value<'gc>,
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -866,7 +866,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
         instance.install_instance_slots(activation.context.gc_context);
 
-        self.call_init(Some(instance), arguments, activation)?;
+        self.call_init(instance.into(), arguments, activation)?;
 
         Ok(instance)
     }
@@ -896,7 +896,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
     fn apply(
         &self,
         activation: &mut Activation<'_, 'gc>,
-        nullable_params: &[Value<'gc>],
+        nullable_param: Value<'gc>,
     ) -> Result<ClassObject<'gc>, Error<'gc>> {
         let self_class = self.inner_class_definition();
 
@@ -904,22 +904,13 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
             return Err(format!("Class {:?} is not generic", self_class.read().name()).into());
         }
 
-        if !self_class.read().params().is_empty() {
+        if !self_class.read().param().is_none() {
             return Err(format!("Class {:?} was already applied", self_class.read().name()).into());
-        }
-
-        if nullable_params.len() != 1 {
-            return Err(format!(
-                "Class {:?} only accepts one type parameter, {} given",
-                self_class.read().name(),
-                nullable_params.len()
-            )
-            .into());
         }
 
         //Because `null` is a valid parameter, we have to accept values as
         //parameters instead of objects. We coerce them to objects now.
-        let object_param = match &nullable_params[0] {
+        let object_param = match nullable_param {
             Value::Null => None,
             Value::Undefined => return Err("Undefined is not a valid type parameter".into()),
             v => Some(v.as_object().unwrap()),
@@ -944,7 +935,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
 
         let parameterized_class = self_class
             .read()
-            .with_type_params(&[class_param], activation.context.gc_context);
+            .with_type_param(class_param, activation.context.gc_context);
 
         let class_scope = self.0.read().class_scope;
         let instance_scope = self.0.read().instance_scope;

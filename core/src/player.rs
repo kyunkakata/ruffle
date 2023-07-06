@@ -329,6 +329,9 @@ impl Player {
     ///
     /// This should not be called if a root movie fetch has already been kicked
     /// off.
+    ///
+    /// `parameters` are *extra* parameters to set on the LoaderInfo -
+    /// parameters from `movie_url` query parameters will be automatically added.
     pub fn fetch_root_movie(
         &mut self,
         movie_url: String,
@@ -1814,7 +1817,6 @@ impl Player {
                 frame_phase: &mut self.frame_phase,
                 stub_tracker: &mut self.stub_tracker,
                 stream_manager,
-                #[cfg(feature = "egui")]
                 dynamic_root,
             };
 
@@ -1863,14 +1865,14 @@ impl Player {
     }
 
     #[cfg(feature = "egui")]
-    pub fn show_debug_ui(&mut self, egui_ctx: &egui::Context) {
+    pub fn show_debug_ui(&mut self, egui_ctx: &egui::Context, movie_offset: f64) {
         // To allow using `mutate_with_update_context` and passing the context inside the debug ui,
         // we avoid borrowing directly from self here.
         // This method should only be called once and it will panic if it tries to recursively render.
         let debug_ui = self.debug_ui.clone();
         let mut debug_ui = debug_ui.borrow_mut();
         self.mutate_with_update_context(|context| {
-            debug_ui.show(egui_ctx, context);
+            debug_ui.show(egui_ctx, context, movie_offset);
         });
     }
 

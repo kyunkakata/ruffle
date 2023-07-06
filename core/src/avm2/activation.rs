@@ -33,6 +33,8 @@ use swf::avm2::types::{
     Multiname as AbcMultiname, Namespace as AbcNamespace, Op,
 };
 
+use super::object::QNameObject;
+
 /// Represents a particular register set.
 ///
 /// This type exists primarily because SmallVec isn't garbage-collectable.
@@ -75,19 +77,6 @@ enum FrameControl<'gc> {
 
 /// Represents a single activation of a given AVM2 function or keyframe.
 pub struct Activation<'a, 'gc: 'a> {
-    /// The immutable value of `this`.
-    #[allow(dead_code)]
-    this: Option<Object<'gc>>,
-
-    /// The arguments this function was called by.
-    #[allow(dead_code)]
-    arguments: Option<Object<'gc>>,
-
-    /// Flags that the current activation frame is being executed and has a
-    /// reader object copied from it. Taking out two readers on the same
-    /// activation frame is a programming error.
-    is_executing: bool,
-
     /// Amount of actions performed since the last timeout check
     actions_since_timeout_check: u16,
 
@@ -96,13 +85,6 @@ pub struct Activation<'a, 'gc: 'a> {
     /// All activations have local registers, but it is possible for multiple
     /// activations (such as a rescope) to execute from the same register set.
     local_registers: RegisterSet<'gc>,
-
-    /// What was returned from the function.
-    ///
-    /// A return value of `None` indicates that the called function is still
-    /// executing. Functions that do not return instead return `Undefined`.
-    #[allow(dead_code)]
-    return_value: Option<Value<'gc>>,
 
     /// This represents the outer scope of the method that is executing.
     ///
@@ -169,12 +151,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let local_registers = RegisterSet::new(0);
 
         Self {
-            this: None,
-            arguments: None,
-            is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
-            return_value: None,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: None,
             subclass_object: None,
@@ -200,12 +178,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let local_registers = RegisterSet::new(0);
 
         Self {
-            this: None,
-            arguments: None,
-            is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
-            return_value: None,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: Some(domain),
             subclass_object: None,
@@ -244,12 +218,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         *local_registers.get_mut(0).unwrap() = global_object.into();
 
         Ok(Self {
-            this: Some(global_object),
-            arguments: None,
-            is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
-            return_value: None,
             outer: ScopeChain::new(domain),
             caller_domain: Some(domain),
             subclass_object: None,
@@ -338,20 +308,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 )
             })?;
 
-        // Type parameters should specialize the returned class.
+        // A type parameter should specialize the returned class.
         // Unresolvable parameter types are treated as Any, which is treated as
         // Object.
-        if !type_name.params().is_empty() {
-            let mut param_types = Vec::with_capacity(type_name.params().len());
-
-            for param in type_name.params() {
-                param_types.push(match self.resolve_type(param)? {
-                    Some(o) => Value::Object(o.into()),
-                    None => Value::Null,
-                });
-            }
-
-            return Ok(Some(class.apply(self, &param_types[..])?));
+        if let Some(param) = type_name.param() {
+            let param_type = match self.resolve_type(&param)? {
+                Some(o) => Value::Object(o.into()),
+                None => Value::Null,
+            };
+            return Ok(Some(class.apply(self, param_type)?));
         }
 
         Ok(Some(class))
@@ -436,7 +401,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         mut context: UpdateContext<'a, 'gc>,
         method: Gc<'gc, BytecodeMethod<'gc>>,
         outer: ScopeChain<'gc>,
-        this: Option<Object<'gc>>,
+        this: Object<'gc>,
         user_arguments: &[Value<'gc>],
         subclass_object: Option<ClassObject<'gc>>,
         callee: Object<'gc>,
@@ -464,7 +429,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let mut local_registers =
             RegisterSet::new(num_locals + num_declared_arguments + arg_register + 1);
-        *local_registers.get_mut(0).unwrap() = this.map(|t| t.into()).unwrap_or(Value::Null);
+        *local_registers.get_mut(0).unwrap() = this.into();
 
         let activation_class = if let Some(class_cache) = method.activation_class {
             let cached_cls = class_cache.read();
@@ -497,12 +462,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         };
 
         let mut activation = Self {
-            this,
-            arguments: None,
-            is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
-            return_value: None,
             outer,
             caller_domain: Some(outer.domain()),
             subclass_object,
@@ -577,7 +538,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// properly supercall.
     pub fn from_builtin(
         context: UpdateContext<'a, 'gc>,
-        this: Option<Object<'gc>>,
         subclass_object: Option<ClassObject<'gc>>,
         outer: ScopeChain<'gc>,
         caller_domain: Option<Domain<'gc>>,
@@ -585,12 +545,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let local_registers = RegisterSet::new(0);
 
         Ok(Self {
-            this,
-            arguments: None,
-            is_executing: false,
             actions_since_timeout_check: 0,
             local_registers,
-            return_value: None,
             outer,
             caller_domain,
             subclass_object,
@@ -617,26 +573,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             });
         let superclass_object = superclass_object?;
 
-        superclass_object.call_native_init(Some(receiver), args, self)
-    }
-
-    /// Attempts to lock the activation frame for execution.
-    ///
-    /// If this frame is already executing, that is an error condition.
-    pub fn lock(&mut self) -> Result<(), Error<'gc>> {
-        if self.is_executing {
-            return Err("Attempted to execute the same frame twice".into());
-        }
-
-        self.is_executing = true;
-
-        Ok(())
-    }
-
-    /// Unlock the activation object. This allows future execution to run on it
-    /// again.
-    pub fn unlock_execution(&mut self) {
-        self.is_executing = false;
+        superclass_object.call_native_init(receiver.into(), args, self)
     }
 
     /// Retrieve a local register.
@@ -1345,8 +1282,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_call(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
         let args = self.pop_stack_args(arg_count);
-        let receiver = self.pop_stack().as_object();
-        let function = self.pop_stack().as_callable(self, None, receiver)?;
+        let receiver = self.pop_stack();
+        let function = self.pop_stack().as_callable(self, None, Some(receiver))?;
         let value = function.call(receiver, &args, self)?;
 
         self.push_stack(value);
@@ -1414,9 +1351,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let function = receiver.get_property(&multiname, self)?.as_callable(
             self,
             Some(&multiname),
-            Some(receiver),
+            Some(receiver.into()),
         )?;
-        let value = function.call(None, &args, self)?;
+        let value = function.call(Value::Null, &args, self)?;
 
         self.push_stack(value);
 
@@ -1447,7 +1384,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         arg_count: u32,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let args = self.pop_stack_args(arg_count);
-        let receiver = self.pop_stack().as_object();
+        let receiver = self.pop_stack();
         let method = self.table_method(method, index, false)?;
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
@@ -1869,9 +1806,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
         let descendants = object.call_public_property(
             "descendants",
-            &[multiname
-                .to_qualified_name_or_star(self.context.gc_context)
-                .into()],
+            &[QNameObject::from_name(self, (*multiname).clone())?.into()],
             self,
         )?;
         self.push_stack(descendants);
@@ -2057,7 +1992,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .into());
         }
 
-        let applied = base.apply(self, &args[..])?;
+        let applied = base.apply(self, args[0])?;
         self.push_stack(applied);
 
         Ok(FrameControl::Continue)
@@ -2970,10 +2905,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Value::Number(_) | Value::Integer(_) => "number",
             Value::Object(o) => {
                 // Subclasses always have a typeof = "object", must be a subclass if the prototype chain is > 2, or not a subclass if <=2
-                let is_not_subclass = matches!(
-                    o.proto().and_then(|p| p.proto()).and_then(|p| p.proto()),
-                    None
-                );
+                let is_not_subclass = o
+                    .proto()
+                    .and_then(|p| p.proto())
+                    .and_then(|p| p.proto())
+                    .is_none();
 
                 match o {
                     Object::FunctionObject(_) => {

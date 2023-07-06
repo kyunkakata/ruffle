@@ -70,7 +70,22 @@ impl<'gc> StageObject<'gc> {
     ) -> Result<Self, Error<'gc>> {
         let this = Self::for_display_object(activation, display_object, class)?;
 
-        class.call_native_init(Some(this.into()), &[], activation)?;
+        class.call_native_init(this.into(), &[], activation)?;
+
+        Ok(this)
+    }
+
+    /// Same as for_display_object_childless, but allows passing
+    /// constructor arguments.
+    pub fn for_display_object_childless_with_args(
+        activation: &mut Activation<'_, 'gc>,
+        display_object: DisplayObject<'gc>,
+        class: ClassObject<'gc>,
+        args: &[Value<'gc>],
+    ) -> Result<Self, Error<'gc>> {
+        let this = Self::for_display_object(activation, display_object, class)?;
+
+        class.call_native_init(this.into(), args, activation)?;
 
         Ok(this)
     }

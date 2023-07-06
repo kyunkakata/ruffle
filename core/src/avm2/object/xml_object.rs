@@ -250,7 +250,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
 
         return method
             .as_callable(activation, Some(multiname), Some(self.into()))?
-            .call(Some(self.into()), arguments, activation);
+            .call(self.into(), arguments, activation);
     }
 
     fn has_own_property(self, name: &Multiname<'gc>) -> bool {
@@ -288,7 +288,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<bool, Error<'gc>> {
-        let name = name_to_multiname(activation, &Value::String(name.into()))?;
+        let name = name_to_multiname(activation, &Value::String(name.into()), false)?;
         Ok(self.has_own_property(&name))
     }
 
@@ -327,9 +327,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
 
             let write = self.0.write(mc);
             let mut kind = write.node.kind_mut(mc);
-            let E4XNodeKind::Element {
-                attributes, ..
-            } = &mut *kind else {
+            let E4XNodeKind::Element { attributes, .. } = &mut *kind else {
                 return Ok(());
             };
 
@@ -340,9 +338,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         let self_node = *self.node();
         let write = self.0.write(mc);
         let mut kind = write.node.kind_mut(mc);
-        let E4XNodeKind::Element {
-            children, ..
-        } = &mut *kind else {
+        let E4XNodeKind::Element { children, .. } = &mut *kind else {
             return Ok(());
         };
 
@@ -399,8 +395,10 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         let mut kind = write.node.kind_mut(mc);
         let E4XNodeKind::Element {
             children,
-            attributes,..
-        } = &mut *kind else {
+            attributes,
+            ..
+        } = &mut *kind
+        else {
             return Ok(false);
         };
 

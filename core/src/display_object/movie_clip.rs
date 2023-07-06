@@ -2103,7 +2103,7 @@ impl<'gc> MovieClip<'gc> {
         if let Avm2Value::Object(object) = self.object2() {
             let mut constr_thing = || {
                 let mut activation = Avm2Activation::from_nothing(context.reborrow());
-                class_object.call_native_init(Some(object), &[], &mut activation)?;
+                class_object.call_native_init(object.into(), &[], &mut activation)?;
 
                 Ok(())
             };
@@ -2529,7 +2529,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
                             if let Err(e) = Avm2::run_stack_frame_for_callable(
                                 callable,
-                                Some(avm2_object),
+                                avm2_object.into(),
                                 &[],
                                 domain,
                                 context,
@@ -2611,7 +2611,9 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         }
 
         if self.world_bounds().contains(point) {
-            let Some(local_matrix) = self.global_to_local_matrix() else { return false; };
+            let Some(local_matrix) = self.global_to_local_matrix() else {
+                return false;
+            };
             if let Some(masker) = self.masker() {
                 if !masker.hit_test_shape(context, point, HitTestOptions::SKIP_INVISIBLE) {
                     return false;
@@ -2911,7 +2913,9 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
     ) -> Option<InteractiveObject<'gc>> {
         if self.visible() {
             let this: InteractiveObject<'gc> = (*self).into();
-            let Some(local_matrix) = self.global_to_local_matrix() else { return None; };
+            let Some(local_matrix) = self.global_to_local_matrix() else {
+                return None;
+            };
 
             if let Some(masker) = self.masker() {
                 if !masker.hit_test_shape(context, point, HitTestOptions::SKIP_INVISIBLE) {
@@ -3012,7 +3016,9 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
     ) -> Avm2MousePick<'gc> {
         if self.visible() {
             let this: InteractiveObject<'gc> = (*self).into();
-            let Some(local_matrix) = self.global_to_local_matrix() else { return Avm2MousePick::Miss; };
+            let Some(local_matrix) = self.global_to_local_matrix() else {
+                return Avm2MousePick::Miss;
+            };
 
             if let Some(masker) = self.masker() {
                 if !masker.hit_test_shape(context, point, HitTestOptions::SKIP_INVISIBLE) {

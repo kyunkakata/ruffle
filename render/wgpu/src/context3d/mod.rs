@@ -124,8 +124,6 @@ impl WgpuContext3D {
                 bind_linear: Default::default(),
                 bind_nearest: Default::default(),
                 texture: Arc::new(dummy_texture),
-                width: 0,
-                height: 0,
                 copy_count: Cell::new(0),
             }))
         };
@@ -407,7 +405,6 @@ pub struct ShaderCompileData {
 #[collect(require_static)]
 pub struct TextureWrapper {
     texture: wgpu::Texture,
-    format: wgpu::TextureFormat,
 }
 
 impl IndexBuffer for IndexBufferWrapper {}
@@ -512,7 +509,7 @@ impl Context3D for WgpuContext3D {
                 | TextureUsages::COPY_DST
                 | TextureUsages::RENDER_ATTACHMENT,
         });
-        Ok(Rc::new(TextureWrapper { texture, format }))
+        Ok(Rc::new(TextureWrapper { texture }))
     }
 
     fn create_cube_texture(
@@ -550,7 +547,7 @@ impl Context3D for WgpuContext3D {
                 | TextureUsages::COPY_DST
                 | TextureUsages::RENDER_ATTACHMENT,
         });
-        Ok(Rc::new(TextureWrapper { texture, format }))
+        Ok(Rc::new(TextureWrapper { texture }))
     }
 
     fn process_command<'gc>(
@@ -704,16 +701,12 @@ impl Context3D for WgpuContext3D {
                         texture: Arc::new(back_buffer_resolve_texture.unwrap()),
                         bind_linear: Default::default(),
                         bind_nearest: Default::default(),
-                        width,
-                        height,
                         copy_count: Cell::new(0),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
                         texture: Arc::new(front_buffer_resolve_texture.unwrap()),
                         bind_linear: Default::default(),
                         bind_nearest: Default::default(),
-                        width,
-                        height,
                         copy_count: Cell::new(0),
                     }));
                 } else {
@@ -724,16 +717,12 @@ impl Context3D for WgpuContext3D {
                         texture: Arc::new(back_buffer_texture),
                         bind_linear: Default::default(),
                         bind_nearest: Default::default(),
-                        width,
-                        height,
                         copy_count: Cell::new(0),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
                         texture: Arc::new(front_buffer_texture),
                         bind_linear: Default::default(),
                         bind_nearest: Default::default(),
-                        width,
-                        height,
                         copy_count: Cell::new(0),
                     }));
                     self.current_texture_resolve_view = None;
@@ -1050,7 +1039,7 @@ impl Context3D for WgpuContext3D {
                 // If we were to use `self.buffer_command_encoder.copy_texture_to_texture`, the
                 // BitmapData's gpu texture might be modified before we actually submit
                 // `buffer_command_encoder` to the device.
-                let mut image_data = match (source.format(), dest.format) {
+                let mut image_data = match (source.format(), dest.texture.format()) {
                     (BitmapFormat::Rgba, wgpu::TextureFormat::Rgba8Unorm) => {
                         Cow::Borrowed(source.data())
                     }
@@ -1068,7 +1057,7 @@ impl Context3D for WgpuContext3D {
                                 let padding_len = COPY_BYTES_PER_ROW_ALIGNMENT as usize
                                     - (row.len() % COPY_BYTES_PER_ROW_ALIGNMENT as usize);
                                 let padding = vec![0; padding_len];
-                                row.iter().copied().chain(padding.into_iter())
+                                row.iter().copied().chain(padding)
                             })
                             .collect(),
                     )
