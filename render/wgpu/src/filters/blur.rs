@@ -6,8 +6,9 @@ use crate::surface::target::CommandTarget;
 use crate::utils::SampleCountMap;
 use bytemuck::{Pod, Zeroable};
 use std::sync::OnceLock;
-use swf::BlurFilter as BlurFilterArgs;
+use swf::{BlurFilter as BlurFilterArgs, Rectangle};
 use wgpu::util::DeviceExt;
+use wgpu::{BufferSlice, CommandEncoder, RenderPipeline, TextureView};
 
 /// How much each pass should multiply the requested blur size by - accumulative.
 /// These are very approximate to Flash, and not 100% exact.
@@ -21,8 +22,8 @@ const PASS_SCALES: [f32; 15] = [
 #[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
 struct BlurUniform {
     direction: [f32; 2],
-    size: f32,
-    _padding: f32,
+    full_size: f32,
+    left_weight: f32,
 }
 
 pub struct BlurFilter {
@@ -33,44 +34,60 @@ pub struct BlurFilter {
 
 impl BlurFilter {
     pub fn new(device: &wgpu::Device) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+        let texture = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                multisampled: false,
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        };
+        let sampling = wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let bind_group_layout = if device.limits().max_push_constant_size > 0 {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[texture, sampling],
+                label: create_debug_label!("Blur filter binds").as_deref(),
+            })
+        } else {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    texture,
+                    sampling,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<BlurUniform>() as u64,
+                            ),
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<BlurUniform>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-            ],
-            label: create_debug_label!("Blur filter binds").as_deref(),
-        });
+                ],
+                label: create_debug_label!("Blur filter binds (with buffer)").as_deref(),
+            })
+        };
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            push_constant_ranges: if device.limits().max_push_constant_size > 0 {
+                &[wgpu::PushConstantRange {
+                    stages: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    range: 0..(std::mem::size_of::<BlurUniform>() as u32),
+                }]
+            } else {
+                &[]
+            },
         });
 
         Self {
@@ -118,6 +135,22 @@ impl BlurFilter {
         })
     }
 
+    pub fn calculate_dest_rect(
+        &self,
+        filter: &BlurFilterArgs,
+        source_rect: Rectangle<i32>,
+    ) -> Rectangle<i32> {
+        let scale = PASS_SCALES[filter.num_passes().clamp(1, 15) as usize - 1];
+        let x = (scale * filter.blur_x.to_f32()).ceil().max(0.0) as i32;
+        let y = (scale * filter.blur_y.to_f32()).ceil().max(0.0) as i32;
+        Rectangle {
+            x_min: source_rect.x_min - x,
+            x_max: source_rect.x_max + x,
+            y_min: source_rect.y_min - y,
+            y_max: source_rect.y_max + y,
+        }
+    }
+
     pub fn apply(
         &self,
         descriptors: &Descriptors,
@@ -130,7 +163,6 @@ impl BlurFilter {
         let format = source.texture.format();
         let pipeline = self.pipeline(descriptors, sample_count);
 
-        // FIXME - these should be larger than the source texture, but we don't support that yet
         let mut flip = CommandTarget::new(
             descriptors,
             texture_pool,
@@ -174,10 +206,10 @@ impl BlurFilter {
                 } else {
                     filter.blur_y.to_f32()
                 };
-                // blur_x/y is the total kernel width; change it to just half excluding center
-                let strength = ((strength.min(255.0) * pass_scale - 1.0) / 2.0).floor();
-                if strength <= 0.0 {
-                    // A strength of 0 is a noop
+                // Full width of the kernel (left edge to right edge)
+                let full_size = (strength.min(255.0) * pass_scale).round();
+                if full_size <= 1.0 {
+                    // A width of 1 or less is a noop (it'd just sample itself and nothing else)
                     continue;
                 }
 
@@ -197,63 +229,38 @@ impl BlurFilter {
                         flip.height() as f32,
                     )
                 };
-                let buffer =
-                    descriptors
-                        .device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: create_debug_label!("Filter arguments").as_deref(),
-                            contents: bytemuck::cast_slice(&[BlurUniform {
-                                direction: if horizontal {
-                                    [1.0 / previous_width, 0.0]
-                                } else {
-                                    [0.0, 1.0 / previous_height]
-                                },
-                                size: strength,
-                                _padding: 0.0,
-                            }]),
-                            usage: wgpu::BufferUsages::UNIFORM,
-                        });
-                let filter_group =
-                    descriptors
-                        .device
-                        .create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: create_debug_label!("Filter group").as_deref(),
-                            layout: &self.bind_group_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(previous_view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        descriptors.bitmap_samplers.get_sampler(false, true),
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: buffer.as_entire_binding(),
-                                },
-                            ],
-                        });
-                {
-                    let mut render_pass =
-                        draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: create_debug_label!("Blur filter").as_deref(),
-                            color_attachments: &[flop.color_attachments()],
-                            depth_stencil_attachment: None,
-                        });
-                    render_pass.set_pipeline(pipeline);
+                let uniform = BlurUniform {
+                    direction: if horizontal {
+                        [1.0 / previous_width, 0.0]
+                    } else {
+                        [0.0, 1.0 / previous_height]
+                    },
+                    full_size,
+                    left_weight: ((full_size % 2.0) * 0.5) + 0.5,
+                };
 
-                    render_pass.set_bind_group(0, &filter_group, &[]);
-
-                    render_pass.set_vertex_buffer(0, previous_vertices);
-                    render_pass.set_index_buffer(
-                        descriptors.quad.indices.slice(..),
-                        wgpu::IndexFormat::Uint32,
+                if descriptors.limits.max_push_constant_size > 0 {
+                    self.render_with_push_constants(
+                        descriptors,
+                        draw_encoder,
+                        pipeline,
+                        &mut flop,
+                        previous_view,
+                        previous_vertices,
+                        uniform,
                     );
-                    render_pass.draw_indexed(0..6, 0, 0..1);
+                } else {
+                    self.render_with_uniform_buffers(
+                        descriptors,
+                        draw_encoder,
+                        pipeline,
+                        &mut flop,
+                        previous_view,
+                        previous_vertices,
+                        uniform,
+                    );
                 }
+
                 std::mem::swap(&mut flip, &mut flop);
             }
         }
@@ -264,5 +271,116 @@ impl BlurFilter {
         } else {
             Some(flip)
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_push_constants(
+        &self,
+        descriptors: &Descriptors,
+        draw_encoder: &mut CommandEncoder,
+        pipeline: &RenderPipeline,
+        destination: &mut CommandTarget,
+        source: &TextureView,
+        vertices: BufferSlice,
+        uniform: BlurUniform,
+    ) {
+        let filter_group = descriptors
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: create_debug_label!("Filter group").as_deref(),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            descriptors.bitmap_samplers.get_sampler(false, true),
+                        ),
+                    },
+                ],
+            });
+
+        let mut render_pass = draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: create_debug_label!("Blur filter").as_deref(),
+            color_attachments: &[destination.color_attachments()],
+            depth_stencil_attachment: None,
+        });
+        render_pass.set_pipeline(pipeline);
+
+        render_pass.set_push_constants(
+            wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::VERTEX,
+            0,
+            bytemuck::cast_slice(&[uniform]),
+        );
+
+        render_pass.set_bind_group(0, &filter_group, &[]);
+
+        render_pass.set_vertex_buffer(0, vertices);
+        render_pass.set_index_buffer(
+            descriptors.quad.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        render_pass.draw_indexed(0..6, 0, 0..1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_uniform_buffers(
+        &self,
+        descriptors: &Descriptors,
+        draw_encoder: &mut CommandEncoder,
+        pipeline: &RenderPipeline,
+        destination: &mut CommandTarget,
+        source: &TextureView,
+        vertices: BufferSlice,
+        uniform: BlurUniform,
+    ) {
+        let buffer = descriptors
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: create_debug_label!("Filter arguments").as_deref(),
+                contents: bytemuck::cast_slice(&[uniform]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let filter_group = descriptors
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: create_debug_label!("Filter group").as_deref(),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            descriptors.bitmap_samplers.get_sampler(false, true),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+        let mut render_pass = draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: create_debug_label!("Blur filter").as_deref(),
+            color_attachments: &[destination.color_attachments()],
+            depth_stencil_attachment: None,
+        });
+        render_pass.set_pipeline(pipeline);
+
+        render_pass.set_bind_group(0, &filter_group, &[]);
+
+        render_pass.set_vertex_buffer(0, vertices);
+        render_pass.set_index_buffer(
+            descriptors.quad.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        render_pass.draw_indexed(0..6, 0, 0..1);
     }
 }

@@ -6,6 +6,7 @@ use crate::gui::{RuffleGui, MENU_HEIGHT};
 use crate::player::{PlayerController, PlayerOptions};
 use anyhow::anyhow;
 use egui::Context;
+use fontdb::{Database, Family, Query, Source};
 use ruffle_core::Player;
 use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
 use ruffle_render_wgpu::descriptors::Descriptors;
@@ -13,6 +14,7 @@ use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::rc::Rc;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
+use unic_langid::LanguageIdentifier;
 use url::Url;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::EventLoop;
@@ -101,6 +103,8 @@ impl GuiController {
         let egui_renderer = egui_wgpu::Renderer::new(&descriptors.device, surface_format, None, 1);
         let event_loop = event_loop.create_proxy();
         let gui = RuffleGui::new(event_loop, opt.movie_url.clone(), PlayerOptions::from(opt));
+        let system_fonts = load_system_fonts(gui.locale.to_owned()).unwrap_or_default();
+        egui_ctx.set_fonts(system_fonts);
         Ok(Self {
             descriptors: Arc::new(descriptors),
             egui_ctx,
@@ -310,4 +314,76 @@ impl GuiController {
     pub fn show_open_dialog(&mut self) {
         self.gui.open_file_advanced()
     }
+}
+
+// try to load known unicode supporting fonts to draw cjk characters in egui
+fn load_system_fonts(locale: LanguageIdentifier) -> anyhow::Result<egui::FontDefinitions> {
+    let mut font_database = Database::default();
+    font_database.load_system_fonts();
+
+    let mut families = Vec::new();
+    if let Some(windows_font) = match locale.language.as_str() {
+        "ja" => Some(Family::Name("MS UI Gothic")),
+        "zh" => Some(match locale.to_string().as_str() {
+            "zh-CN" => Family::Name("Microsoft YaHei"),
+            _ => Family::Name("Microsoft JhengHei"),
+        }),
+        "ko" => Some(Family::Name("Malgun Gothic")),
+        _ => None,
+    } {
+        families.push(windows_font);
+    }
+    if let Some(linux_font) = match locale.language.as_str() {
+        "ja" => Some(Family::Name("Noto Sans CJK JP")),
+        "zh" => Some(match locale.to_string().as_str() {
+            "zh-CN" => Family::Name("Noto Sans CJK SC"),
+            _ => Family::Name("Noto Sans CJK TC"),
+        }),
+        "ko" => Some(Family::Name("Noto Sans CJK KR")),
+        _ => Some(Family::Name("Noto Sans")),
+    } {
+        families.push(linux_font);
+    }
+    families.extend(
+        [
+            Family::Name("Arial Unicode MS"), // macos
+            Family::SansSerif,
+        ]
+        .iter(),
+    );
+
+    let system_unicode_fonts = Query {
+        families: &families,
+        ..Query::default()
+    };
+
+    let id = font_database
+        .query(&system_unicode_fonts)
+        .ok_or(anyhow!("no unicode fonts found!"))?;
+    let (name, src, index) = font_database
+        .face(id)
+        .map(|f| (f.post_script_name.clone(), f.source.clone(), f.index))
+        .expect("id not found in font database");
+
+    let mut fontdata = match src {
+        Source::File(path) => {
+            let data = std::fs::read(path)?;
+            egui::FontData::from_owned(data)
+        }
+        Source::Binary(bin) | Source::SharedFile(_, bin) => {
+            let data = bin.as_ref().as_ref().to_vec();
+            egui::FontData::from_owned(data)
+        }
+    };
+    fontdata.index = index;
+    tracing::info!("loaded cjk fallback font \"{}\"", name);
+
+    let mut fd = egui::FontDefinitions::default();
+    fd.font_data.insert(name.clone(), fontdata);
+    fd.families
+        .get_mut(&egui::FontFamily::Proportional)
+        .expect("font family not found")
+        .push(name);
+
+    Ok(fd)
 }

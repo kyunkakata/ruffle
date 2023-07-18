@@ -23,7 +23,7 @@ use crate::display_object::DisplayObject;
 use crate::html::TextFormat;
 use crate::streams::NetStream;
 use crate::string::AvmString;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use ruffle_macros::enum_trait_object;
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
@@ -1062,14 +1062,19 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     /// checking against this object.
     fn is_of_type(
         &self,
-        test_class: ClassObject<'gc>,
+        test_class: GcCell<'gc, Class<'gc>>,
         context: &mut UpdateContext<'_, 'gc>,
     ) -> bool {
         let my_class = self.instance_of();
 
         // ES3 objects are not class instances but are still treated as
         // instances of Object, which is an ES4 class.
-        if my_class.is_none() && Object::ptr_eq(test_class, context.avm2.classes().object) {
+        if my_class.is_none()
+            && GcCell::ptr_eq(
+                test_class,
+                context.avm2.classes().object.inner_class_definition(),
+            )
+        {
             true
         } else if let Some(my_class) = my_class {
             my_class.has_class_in_chain(test_class)
@@ -1401,14 +1406,14 @@ impl<'gc> Object<'gc> {
             Self::TextFormatObject(o) => WeakObject::TextFormatObject(TextFormatObjectWeak(GcCell::downgrade(o.0))),
             Self::ProxyObject(o) => WeakObject::ProxyObject(ProxyObjectWeak(GcCell::downgrade(o.0))),
             Self::ErrorObject(o) => WeakObject::ErrorObject(ErrorObjectWeak(GcCell::downgrade(o.0))),
-            Self::Stage3DObject(o) => WeakObject::Stage3DObject(Stage3DObjectWeak(GcCell::downgrade(o.0))),
-            Self::Context3DObject(o) => WeakObject::Context3DObject(Context3DObjectWeak(GcCell::downgrade(o.0))),
-            Self::IndexBuffer3DObject(o) => WeakObject::IndexBuffer3DObject(IndexBuffer3DObjectWeak(GcCell::downgrade(o.0))),
-            Self::VertexBuffer3DObject(o) => WeakObject::VertexBuffer3DObject(VertexBuffer3DObjectWeak(GcCell::downgrade(o.0))),
-            Self::TextureObject(o) => WeakObject::TextureObject(TextureObjectWeak(GcCell::downgrade(o.0))),
-            Self::Program3DObject(o) => WeakObject::Program3DObject(Program3DObjectWeak(GcCell::downgrade(o.0))),
+            Self::Stage3DObject(o) => WeakObject::Stage3DObject(Stage3DObjectWeak(Gc::downgrade(o.0))),
+            Self::Context3DObject(o) => WeakObject::Context3DObject(Context3DObjectWeak(Gc::downgrade(o.0))),
+            Self::IndexBuffer3DObject(o) => WeakObject::IndexBuffer3DObject(IndexBuffer3DObjectWeak(Gc::downgrade(o.0))),
+            Self::VertexBuffer3DObject(o) => WeakObject::VertexBuffer3DObject(VertexBuffer3DObjectWeak(Gc::downgrade(o.0))),
+            Self::TextureObject(o) => WeakObject::TextureObject(TextureObjectWeak(Gc::downgrade(o.0))),
+            Self::Program3DObject(o) => WeakObject::Program3DObject(Program3DObjectWeak(Gc::downgrade(o.0))),
             Self::NetStreamObject(o) => WeakObject::NetStreamObject(NetStreamObjectWeak(GcCell::downgrade(o.0))),
-            Self::ShaderDataObject(o) => WeakObject::ShaderDataObject(ShaderDataObjectWeak(GcCell::downgrade(o.0))),
+            Self::ShaderDataObject(o) => WeakObject::ShaderDataObject(ShaderDataObjectWeak(Gc::downgrade(o.0))),
         }
     }
 }

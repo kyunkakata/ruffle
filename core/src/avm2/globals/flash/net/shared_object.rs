@@ -10,9 +10,26 @@ use crate::string::AvmString;
 use flash_lso::types::{AMFVersion, Lso};
 use std::borrow::Cow;
 
+fn new_lso<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    name: &str,
+    data: Object<'gc>,
+) -> Result<Lso, Error<'gc>> {
+    let mut elements = Vec::new();
+    crate::avm2::amf::recursive_serialize(activation, data, &mut elements, AMFVersion::AMF3)?;
+    Ok(Lso::new(
+        elements,
+        name.split('/')
+            .last()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        AMFVersion::AMF3,
+    ))
+}
+
 pub fn get_local<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // TODO: It appears that Flash does some kind of escaping here:
@@ -133,7 +150,7 @@ pub fn get_local<'gc>(
     }
 
     // Data property only should exist when created with getLocal/Remote
-    let sharedobject_cls = this.unwrap(); // `this` of a static method is the class
+    let sharedobject_cls = this; // `this` of a static method is the class
     let mut this = sharedobject_cls.construct(activation, &[])?;
 
     // Set the internal name
@@ -177,44 +194,63 @@ pub fn get_local<'gc>(
 
 pub fn flush<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        let data = this
-            .get_public_property("data", activation)?
-            .coerce_to_object(activation)?;
+    let data = this
+        .get_public_property("data", activation)?
+        .coerce_to_object(activation)?;
 
-        let ruffle_name = Multiname::new(
-            Namespace::package("__ruffle__", &mut activation.borrow_gc()),
-            "_ruffleName",
-        );
-        let name = this
-            .get_property(&ruffle_name, activation)?
-            .coerce_to_string(activation)?;
-        let name = name.to_utf8_lossy();
+    let ruffle_name = Multiname::new(
+        Namespace::package("__ruffle__", &mut activation.borrow_gc()),
+        "_ruffleName",
+    );
+    let name = this
+        .get_property(&ruffle_name, activation)?
+        .coerce_to_string(activation)?;
+    let name = name.to_utf8_lossy();
 
-        let mut elements = Vec::new();
-        crate::avm2::amf::recursive_serialize(activation, data, &mut elements, AMFVersion::AMF3)?;
-        let mut lso = Lso::new(
-            elements,
-            name.split('/')
-                .last()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string()),
-            AMFVersion::AMF3,
-        );
-
+    let mut lso = new_lso(activation, &name, data)?;
+    // Flash does not write empty LSOs to disk
+    if lso.body.is_empty() {
+        Ok(true.into())
+    } else {
         let bytes = flash_lso::write::write_to_bytes(&mut lso).unwrap_or_default();
-
-        return Ok(activation.context.storage.put(&name, &bytes).into());
+        Ok(activation.context.storage.put(&name, &bytes).into())
     }
-    Ok(Value::Undefined)
+}
+
+pub fn get_size<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let data = this
+        .get_public_property("data", activation)?
+        .coerce_to_object(activation)?;
+
+    let ruffle_name = Multiname::new(
+        Namespace::package("__ruffle__", &mut activation.borrow_gc()),
+        "_ruffleName",
+    );
+    let name = this
+        .get_property(&ruffle_name, activation)?
+        .coerce_to_string(activation)?;
+    let name = name.to_utf8_lossy();
+
+    let mut lso = new_lso(activation, &name, data)?;
+    // Flash returns 0 for empty LSOs, but the actual number of bytes (including the header) otherwise
+    if lso.body.is_empty() {
+        Ok(0.into())
+    } else {
+        let bytes = flash_lso::write::write_to_bytes(&mut lso).unwrap_or_default();
+        Ok(bytes.len().into())
+    }
 }
 
 pub fn close<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_method!(activation, "flash.net.SharedObject", "close");
@@ -223,29 +259,28 @@ pub fn close<'gc>(
 
 pub fn clear<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    mut this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut this) = this {
-        // Create a fresh data object.
-        let data = activation
-            .avm2()
-            .classes()
-            .object
-            .construct(activation, &[])?
-            .into();
-        this.set_public_property("data", data, activation)?;
+    // Create a fresh data object.
+    let data = activation
+        .avm2()
+        .classes()
+        .object
+        .construct(activation, &[])?
+        .into();
+    this.set_public_property("data", data, activation)?;
 
-        // Delete data from storage backend.
-        let ruffle_name = Multiname::new(
-            Namespace::package("__ruffle__", &mut activation.borrow_gc()),
-            "_ruffleName",
-        );
-        let name = this
-            .get_property(&ruffle_name, activation)?
-            .coerce_to_string(activation)?;
-        let name = name.to_utf8_lossy();
-        activation.context.storage.remove_key(&name);
-    }
+    // Delete data from storage backend.
+    let ruffle_name = Multiname::new(
+        Namespace::package("__ruffle__", &mut activation.borrow_gc()),
+        "_ruffleName",
+    );
+    let name = this
+        .get_property(&ruffle_name, activation)?
+        .coerce_to_string(activation)?;
+    let name = name.to_utf8_lossy();
+    activation.context.storage.remove_key(&name);
+
     Ok(Value::Undefined)
 }

@@ -55,7 +55,7 @@ impl<'gc> Domain<'gc> {
         mc: MutationContext<'gc, '_>,
         parent: Option<Domain<'gc>>,
     ) -> Domain<'gc> {
-        Self(GcCell::allocate(
+        Self(GcCell::new(
             mc,
             DomainData {
                 defs: PropertyMap::new(),
@@ -75,7 +75,7 @@ impl<'gc> Domain<'gc> {
     /// This function must not be called before the player globals have been
     /// fully allocated.
     pub fn movie_domain(activation: &mut Activation<'_, 'gc>, parent: Domain<'gc>) -> Domain<'gc> {
-        let this = Self(GcCell::allocate(
+        let this = Self(GcCell::new(
             activation.context.gc_context,
             DomainData {
                 defs: PropertyMap::new(),
@@ -149,7 +149,7 @@ impl<'gc> Domain<'gc> {
         Ok(None)
     }
 
-    pub fn get_class(
+    fn get_class_inner(
         self,
         multiname: &Multiname<'gc>,
     ) -> Result<Option<GcCell<'gc, Class<'gc>>>, Error<'gc>> {
@@ -159,10 +159,30 @@ impl<'gc> Domain<'gc> {
         }
 
         if let Some(parent) = read.parent {
-            return parent.get_class(multiname);
+            return parent.get_class_inner(multiname);
         }
 
         Ok(None)
+    }
+
+    pub fn get_class(
+        self,
+        multiname: &Multiname<'gc>,
+        mc: MutationContext<'gc, '_>,
+    ) -> Result<Option<GcCell<'gc, Class<'gc>>>, Error<'gc>> {
+        let class = self.get_class_inner(multiname)?;
+
+        if let Some(class) = class {
+            if let Some(param) = multiname.param() {
+                if !param.is_any_name() {
+                    if let Some(resolved_param) = self.get_class(&param, mc)? {
+                        return Ok(Some(Class::with_type_param(class, resolved_param, mc)));
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(class)
     }
 
     /// Resolve a Multiname and return the script that provided it.

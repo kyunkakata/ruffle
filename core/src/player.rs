@@ -46,8 +46,7 @@ use crate::stub::StubCollection;
 use crate::tag_utils::SwfMovie;
 use crate::timer::Timers;
 use crate::vminterface::Instantiator;
-use gc_arena::{ArenaParameters, Collect, DynamicRootSet, GcCell};
-use gc_arena::{MutationContext, Rootable};
+use gc_arena::{ArenaParameters, Collect, DynamicRootSet, GcCell, Rootable};
 use instant::Instant;
 use rand::{rngs::SmallRng, SeedableRng};
 use ruffle_render::backend::{null::NullRenderer, RenderBackend, ViewportDimensions};
@@ -212,7 +211,7 @@ impl<'gc> GcRootData<'gc> {
     }
 }
 
-type GcArena = gc_arena::Arena<Rootable![GcRoot<'gc>]>;
+type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
 
 type Audio = Box<dyn AudioBackend>;
 type Navigator = Box<dyn NavigatorBackend>;
@@ -1254,15 +1253,44 @@ impl Player {
                 ));
             }
 
+            let mut new_over_object_updated = false;
             // Cancel hover if an object is removed from the stage.
             if let Some(hovered) = context.mouse_over_object {
                 if !context.is_action_script_3() && hovered.as_displayobject().avm1_removed() {
                     context.mouse_over_object = None;
+                    if let Some(new_object) = new_over_object {
+                        if Self::check_display_object_equality(
+                            new_object.as_displayobject(),
+                            hovered.as_displayobject(),
+                        ) {
+                            if let Some(state) = hovered.as_displayobject().state() {
+                                new_object.as_displayobject().set_state(context, state);
+                            }
+                            context.mouse_over_object = Some(new_object);
+                            new_over_object_updated = true;
+                        }
+                    }
                 }
             }
+
             if let Some(pressed) = context.mouse_down_object {
                 if !context.is_action_script_3() && pressed.as_displayobject().avm1_removed() {
                     context.mouse_down_object = None;
+                    let mut display_object = None;
+                    if let Some(root_clip) = context.stage.root_clip() {
+                        display_object = Self::find_first_character_instance(
+                            root_clip,
+                            pressed.as_displayobject(),
+                        );
+                    }
+
+                    if let Some(new_down_object) = display_object {
+                        if let Some(state) = pressed.as_displayobject().state() {
+                            new_down_object.set_state(context, state);
+                        }
+
+                        context.mouse_down_object = new_down_object.as_interactive();
+                    }
                 }
             }
 
@@ -1347,8 +1375,9 @@ impl Player {
                     }
                 }
             }
-            context.mouse_over_object = new_over_object;
-
+            if !new_over_object_updated {
+                context.mouse_over_object = new_over_object;
+            }
             // Handle presses and releases.
             if is_mouse_button_changed {
                 if context.input.is_mouse_down() {
@@ -1366,10 +1395,20 @@ impl Player {
                         events.push((context.stage.into(), ClipEvent::MouseUpInside));
                     }
 
-                    let released_inside = InteractiveObject::option_ptr_eq(
+                    let mut released_inside = InteractiveObject::option_ptr_eq(
                         context.mouse_down_object,
                         context.mouse_over_object,
                     );
+                    if let Some(down) = context.mouse_down_object {
+                        if let Some(over) = context.mouse_over_object {
+                            if !released_inside {
+                                released_inside = Self::check_display_object_equality(
+                                    down.as_displayobject(),
+                                    over.as_displayobject(),
+                                );
+                            }
+                        }
+                    }
                     if released_inside {
                         // Released inside the clicked object.
                         if let Some(down_object) = context.mouse_down_object {
@@ -1443,6 +1482,35 @@ impl Player {
         needs_render
     }
 
+    //Checks if two displayObjects have the same depth and id and accur in the same movie.s
+    fn check_display_object_equality(object1: DisplayObject, object2: DisplayObject) -> bool {
+        object1.depth() == object2.depth()
+            && object1.id() == object2.id()
+            && Arc::ptr_eq(&object1.movie(), &object2.movie())
+    }
+    ///This searches for a display object by it's id.
+    ///When a button is being held down but the mouse stops hovering over the object
+    ///we need to know if th button is still there after goto.
+    //TODO: is there a better place to place next two functions?
+    fn find_first_character_instance<'gc>(
+        obj: DisplayObject<'gc>,
+        previous_object: DisplayObject<'gc>,
+    ) -> Option<DisplayObject<'gc>> {
+        if let Some(parent) = obj.as_container() {
+            for child in parent.iter_render_list() {
+                if Self::check_display_object_equality(child, previous_object) {
+                    return Some(child);
+                }
+
+                let display_object = Self::find_first_character_instance(child, previous_object);
+                if display_object.is_some() {
+                    return display_object;
+                }
+            }
+        }
+        None
+    }
+
     /// Preload all pending movies in the player, including the root movie.
     ///
     /// This should be called periodically with a reasonable execution limit.
@@ -1463,7 +1531,7 @@ impl Player {
                 .root_clip()
                 .and_then(|root| root.as_movie_clip())
             {
-                let was_root_movie_loaded = root.loaded_bytes() == root.total_bytes();
+                let was_root_movie_loaded = root.loaded_bytes() as i32 == root.total_bytes();
                 did_finish = root.preload(context, limit);
 
                 if let Some(loader_info) = root.loader_info().filter(|_| !was_root_movie_loaded) {
@@ -1849,7 +1917,7 @@ impl Player {
     }
 
     pub fn load_device_font<'gc>(
-        gc_context: gc_arena::MutationContext<'gc, '_>,
+        gc_context: &'gc gc_arena::Mutation<'gc>,
         renderer: &mut dyn RenderBackend,
     ) -> Font<'gc> {
         const DEVICE_FONT_TAG: &[u8] = include_bytes!("../assets/noto-sans-definefont3.bin");
@@ -1919,7 +1987,9 @@ impl Player {
                 Activation::try_from_stub(context.reborrow(), ActivationIdentifier::root("[Flush]"))
             {
                 for so in avm1_activation.context.avm1_shared_objects.clone().values() {
-                    if let Err(e) = crate::avm1::flush(&mut avm1_activation, *so, &[]) {
+                    if let Err(e) =
+                        crate::avm1::globals::shared_object::flush(&mut avm1_activation, *so, &[])
+                    {
                         tracing::error!("Error flushing AVM1 shared object `{:?}`: {:?}", so, e);
                     }
                 }
@@ -1929,7 +1999,7 @@ impl Player {
             for so in avm2_activation.context.avm2_shared_objects.clone().values() {
                 if let Err(e) = crate::avm2::globals::flash::net::shared_object::flush(
                     &mut avm2_activation,
-                    Some(*so),
+                    *so,
                     &[],
                 ) {
                     tracing::error!("Error flushing AVM2 shared object `{:?}`: {:?}", so, e);
@@ -2249,7 +2319,7 @@ impl PlayerBuilder {
     }
 
     fn create_gc_root<'gc>(
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &'gc gc_arena::Mutation<'gc>,
         player_version: u8,
         fullscreen: bool,
         fake_movie: Arc<SwfMovie>,
@@ -2263,8 +2333,8 @@ impl PlayerBuilder {
         let dynamic_root = DynamicRootSet::new(gc_context);
 
         GcRoot {
-            callstack: GcCell::allocate(gc_context, GcCallstack::default()),
-            data: GcCell::allocate(
+            callstack: GcCell::new(gc_context, GcCallstack::default()),
+            data: GcCell::new(
                 gc_context,
                 GcRootData {
                     audio_manager: AudioManager::new(),

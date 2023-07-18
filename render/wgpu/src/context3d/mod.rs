@@ -1,14 +1,11 @@
-use lru::LruCache;
-use naga_agal::{SamplerOverride, VertexAttributeFormat};
 use ruffle_render::backend::{
     Context3D, Context3DBlendFactor, Context3DCommand, Context3DCompareMode,
-    Context3DTextureFormat, Context3DVertexBufferFormat, IndexBuffer, ProgramType, ShaderModule,
-    VertexBuffer,
+    Context3DTextureFormat, Context3DVertexBufferFormat, IndexBuffer, ProgramType, VertexBuffer,
 };
 use ruffle_render::bitmap::{BitmapFormat, BitmapHandle};
 use ruffle_render::error::Error;
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::Cell;
 use swf::{Rectangle, Twips};
 
 use wgpu::util::StagingBelt;
@@ -21,15 +18,17 @@ use wgpu::{CommandEncoder, Extent3d, RenderPass};
 use crate::context3d::current_pipeline::{BoundTextureData, AGAL_FLOATS_PER_REGISTER};
 use crate::descriptors::Descriptors;
 use crate::Texture;
-use gc_arena::{Collect, MutationContext};
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::Arc;
 
 mod current_pipeline;
+mod shader_pair;
 
 use current_pipeline::CurrentPipeline;
+
+use self::shader_pair::ShaderPairAgal;
 
 const COLOR_MASK: u32 = 1 << 0;
 const DEPTH_MASK: u32 = 1 << 1;
@@ -48,8 +47,6 @@ const STENCIL_MASK: u32 = 1 << 2;
 /// we would need to store a `GcCell<Option<Rc<dyn VertexBuffer>>>`, which prevents
 /// us from obtaining a long-lived reference to the `wgpu:Bufer` (it would instead be
 /// tied to the `Ref` returned by `GcCell::read`).
-#[derive(Collect)]
-#[collect(require_static)]
 pub struct WgpuContext3D {
     // We only use some of the fields from `Descriptors`, but we
     // store an entire `Arc<Descriptors>` rather than wrapping the fields
@@ -335,8 +332,6 @@ impl WgpuContext3D {
     }
 }
 
-#[derive(Collect)]
-#[collect(require_static)]
 pub struct IndexBufferWrapper {
     pub buffer: wgpu::Buffer,
     /// A cpu-side copy of the buffer data. This is used to allow us to
@@ -344,72 +339,18 @@ pub struct IndexBufferWrapper {
     pub data: Vec<u8>,
 }
 
-#[derive(Collect, Debug)]
-#[collect(require_static)]
+#[derive(Debug)]
 pub struct VertexBufferWrapper {
     pub buffer: wgpu::Buffer,
     pub data_32_per_vertex: u8,
 }
 
-#[derive(Collect)]
-#[collect(require_static)]
-pub struct ShaderModuleAgal {
-    bytecode: Vec<u8>,
-    // Caches compiled wgpu shader modules. The cache key represents all of the data
-    // that we need to pass to `naga_agal::agal_to_naga` to compile a shader.
-    compiled: RefCell<LruCache<ShaderCompileData, wgpu::ShaderModule>>,
-}
-
-impl ShaderModuleAgal {
-    pub fn new(bytecode: Vec<u8>) -> Self {
-        Self {
-            bytecode,
-            // TODO - figure out a good size for this cache.
-            compiled: RefCell::new(LruCache::new(NonZeroUsize::new(2).unwrap())),
-        }
-    }
-
-    pub fn compile(
-        &self,
-        descriptors: &Descriptors,
-        data: ShaderCompileData,
-    ) -> RefMut<'_, wgpu::ShaderModule> {
-        let compiled = self.compiled.borrow_mut();
-        RefMut::map(compiled, |compiled| {
-            // TODO: Figure out a way to avoid the clone when we have a cache hit
-            compiled.get_or_insert_mut(data.clone(), || {
-                let naga_module = naga_agal::agal_to_naga(
-                    &self.bytecode,
-                    &data.vertex_attributes,
-                    &data.sampler_overrides,
-                )
-                .unwrap();
-                descriptors
-                    .device
-                    .create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some("AGAL shader"),
-                        source: wgpu::ShaderSource::Naga(Cow::Owned(naga_module)),
-                    })
-            })
-        })
-    }
-}
-
-#[derive(Hash, Eq, PartialEq, Clone)]
-pub struct ShaderCompileData {
-    sampler_overrides: [Option<SamplerOverride>; 8],
-    vertex_attributes: [Option<VertexAttributeFormat>; MAX_VERTEX_ATTRIBUTES],
-}
-
-#[derive(Collect)]
-#[collect(require_static)]
 pub struct TextureWrapper {
     texture: wgpu::Texture,
 }
 
 impl IndexBuffer for IndexBufferWrapper {}
 impl VertexBuffer for VertexBufferWrapper {}
-impl ShaderModule for ShaderModuleAgal {}
 impl ruffle_render::backend::Texture for TextureWrapper {}
 
 // Context3D.setVertexBufferAt supports up to 8 vertex buffer attributes
@@ -550,11 +491,7 @@ impl Context3D for WgpuContext3D {
         Ok(Rc::new(TextureWrapper { texture }))
     }
 
-    fn process_command<'gc>(
-        &mut self,
-        command: Context3DCommand<'_, 'gc>,
-        mc: MutationContext<'gc, '_>,
-    ) {
+    fn process_command(&mut self, command: Context3DCommand<'_>) {
         match command {
             Context3DCommand::Clear {
                 red,
@@ -965,32 +902,21 @@ impl Context3D for WgpuContext3D {
             }
 
             Context3DCommand::UploadShaders {
-                vertex_shader,
+                module,
                 vertex_shader_agal,
-                fragment_shader,
                 fragment_shader_agal,
             } => {
-                *vertex_shader.write(mc) = Some(Rc::new(ShaderModuleAgal::new(vertex_shader_agal)));
-                *fragment_shader.write(mc) =
-                    Some(Rc::new(ShaderModuleAgal::new(fragment_shader_agal)));
+                *module.borrow_mut() = Some(Rc::new(ShaderPairAgal::new(
+                    vertex_shader_agal,
+                    fragment_shader_agal,
+                )));
             }
 
-            Context3DCommand::SetShaders {
-                vertex_shader,
-                fragment_shader,
-            } => {
-                let vertex_module = vertex_shader
-                    .read()
-                    .clone()
-                    .map(|shader| shader.into_any_rc().downcast::<ShaderModuleAgal>().unwrap());
+            Context3DCommand::SetShaders { module } => {
+                let shaders =
+                    module.map(|shader| shader.into_any_rc().downcast::<ShaderPairAgal>().unwrap());
 
-                let fragment_module = fragment_shader
-                    .read()
-                    .clone()
-                    .map(|shader| shader.into_any_rc().downcast::<ShaderModuleAgal>().unwrap());
-
-                self.current_pipeline.set_vertex_shader(vertex_module);
-                self.current_pipeline.set_fragment_shader(fragment_module);
+                self.current_pipeline.set_shaders(shaders)
             }
             Context3DCommand::SetProgramConstantsFromVector {
                 program_type,
@@ -1120,7 +1046,7 @@ impl Context3D for WgpuContext3D {
 
                     Some(BoundTextureData {
                         id: texture.clone(),
-                        view: texture_wrapper.texture.create_view(&view),
+                        view: Rc::new(texture_wrapper.texture.create_view(&view)),
                         cube,
                     })
                 } else {

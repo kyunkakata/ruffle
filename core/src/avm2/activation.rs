@@ -43,7 +43,7 @@ pub struct RegisterSet<'gc>(SmallVec<[Value<'gc>; 8]>);
 
 unsafe impl<'gc> gc_arena::Collect for RegisterSet<'gc> {
     #[inline]
-    fn trace(&self, cc: gc_arena::CollectionContext) {
+    fn trace(&self, cc: &gc_arena::Collection) {
         for register in &self.0 {
             register.trace(cc);
         }
@@ -139,6 +139,13 @@ pub struct Activation<'a, 'gc: 'a> {
 }
 
 impl<'a, 'gc> Activation<'a, 'gc> {
+    /// Convenience method to retrieve the current GC context. Note that explicitely writing
+    /// `self.context.gc_context` can be sometimes necessary to satisfy the borrow checker.
+    #[inline(always)]
+    pub fn gc(&self) -> &'gc gc_arena::Mutation<'gc> {
+        self.context.gc_context
+    }
+
     /// Construct an activation that does not represent any particular scope.
     ///
     /// This exists primarily for non-AVM2 related manipulations of the
@@ -276,50 +283,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
     }
 
-    /// Resolves a class definition as per `resolve_definition`, and yield an
-    /// error relating to types if the class does not exist.
-    pub fn resolve_class(&mut self, name: &Multiname<'gc>) -> Result<ClassObject<'gc>, Error<'gc>> {
-        self.resolve_definition(name)?
-            .and_then(|maybe| maybe.as_object())
-            .and_then(|o| o.as_class_object())
-            .ok_or_else(|| format!("Attempted to resolve nonexistent type {name:?}").into())
-    }
-
-    /// Resolve a type name to a class.
-    ///
-    /// This returns an error if a type is named but does not exist; or if the
-    /// typed named is not a class object.
-    pub fn resolve_type(
+    pub fn lookup_class_in_domain(
         &mut self,
-        type_name: &Multiname<'gc>,
-    ) -> Result<Option<ClassObject<'gc>>, Error<'gc>> {
-        if type_name.is_any_name() {
-            return Ok(None);
-        }
-
-        let class = self
-            .resolve_definition(type_name)?
-            .and_then(|o| o.as_object())
-            .and_then(|c| c.as_class_object())
-            .ok_or_else(|| {
-                format!(
-                    "Resolved parameter type {} is unresolvable, not a class, null, or undefined",
-                    type_name.to_qualified_name(self.context.gc_context)
-                )
-            })?;
-
-        // A type parameter should specialize the returned class.
-        // Unresolvable parameter types are treated as Any, which is treated as
-        // Object.
-        if let Some(param) = type_name.param() {
-            let param_type = match self.resolve_type(&param)? {
-                Some(o) => Value::Object(o.into()),
-                None => Value::Null,
-            };
-            return Ok(Some(class.apply(self, param_type)?));
-        }
-
-        Ok(Some(class))
+        name: &Multiname<'gc>,
+    ) -> Result<GcCell<'gc, Class<'gc>>, Error<'gc>> {
+        self.domain()
+            .get_class(name, self.context.gc_context)?
+            .ok_or_else(|| format!("Attempted to resolve nonexistent type {name:?}").into())
     }
 
     /// Resolve a single parameter value.
@@ -801,7 +771,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pool_maybe_uninitialized_multiname(index, &mut self.borrow_gc())?;
         if name.has_lazy_component() {
             let name = name.fill_with_runtime_params(self)?;
-            Ok(Gc::allocate(self.context.gc_context, name))
+            Ok(Gc::new(self.context.gc_context, name))
         } else {
             Ok(name)
         }
@@ -909,7 +879,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         matches = true;
                     } else if let Ok(err_object) = err_object {
                         let type_name = self.pool_multiname_static(method, e.type_name)?;
-                        let ty_class = self.resolve_class(&type_name)?;
+                        let ty_class = self.lookup_class_in_domain(&type_name)?;
 
                         matches = err_object.is_of_type(ty_class, &mut self.context);
                     }
@@ -2105,8 +2075,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_check_filter(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let xml = self.avm2().classes().xml;
-        let xml_list = self.avm2().classes().xml_list;
+        let xml = self.avm2().classes().xml.inner_class_definition();
+        let xml_list = self.avm2().classes().xml_list.inner_class_definition();
         let value = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         if value.is_of_type(xml, &mut self.context) || value.is_of_type(xml_list, &mut self.context)
@@ -2791,7 +2761,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self.pop_stack();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let type_object = self.resolve_class(&multiname)?;
+        let type_object = self.lookup_class_in_domain(&multiname)?;
 
         let is_instance_of = value.is_of_type(self, type_object);
         self.push_stack(is_instance_of);
@@ -2804,7 +2774,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .pop_stack()
             .as_object()
             .and_then(|o| o.as_class_object())
-            .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?;
+            .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?
+            .inner_class_definition();
         let value = self.pop_stack();
 
         let is_instance_of = value.is_of_type(self, type_object);
@@ -2821,7 +2792,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self.pop_stack();
 
         let multiname = self.pool_multiname_static(method, type_name_index)?;
-        let class = self.resolve_class(&multiname)?;
+        let class = self.lookup_class_in_domain(&multiname)?;
 
         if value.is_of_type(self, class) {
             self.push_stack(value);
@@ -2847,7 +2818,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             )?))?;
             let value = self.pop_stack();
 
-            if value.is_of_type(self, class) {
+            if value.is_of_type(self, class.inner_class_definition()) {
                 self.push_stack(value);
             } else {
                 self.push_stack(Value::Null);

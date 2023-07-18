@@ -164,7 +164,7 @@ impl<'gc> Avm2<'gc> {
             player_version,
             stack: Vec::new(),
             scope_stack: Vec::new(),
-            call_stack: GcCell::allocate(context.gc_context, CallStack::new()),
+            call_stack: GcCell::new(context.gc_context, CallStack::new()),
             playerglobals_domain,
             stage_domain,
             system_classes: None,
@@ -232,7 +232,7 @@ impl<'gc> Avm2<'gc> {
                     .context
                     .avm2
                     .push_global_init(init_activation.context.gc_context, script);
-                let r = (method.method)(&mut init_activation, Some(scope), &[]);
+                let r = (method.method)(&mut init_activation, scope, &[]);
                 init_activation
                     .context
                     .avm2
@@ -433,7 +433,7 @@ impl<'gc> Avm2<'gc> {
             if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc_context)) {
                 let mut activation = Activation::from_nothing(context.reborrow());
 
-                if object.is_of_type(on_type, &mut activation.context) {
+                if object.is_of_type(on_type.inner_class_definition(), &mut activation.context) {
                     if let Err(err) = events::dispatch_event(&mut activation, object, event) {
                         tracing::error!(
                             "Encountered AVM2 error when broadcasting `{}` event: {:?}",

@@ -178,6 +178,7 @@ pub struct NetStreamData<'gc> {
     ///
     /// Any `Video`s on the stage will display the bitmap here when attached to
     /// this `NetStream`.
+    #[collect(require_static)]
     last_decoded_bitmap: Option<BitmapInfo>,
 
     /// The AVM side of this stream.
@@ -186,7 +187,7 @@ pub struct NetStreamData<'gc> {
 
 impl<'gc> NetStream<'gc> {
     pub fn new(gc_context: MutationContext<'gc, '_>, avm_object: Option<AvmObject<'gc>>) -> Self {
-        Self(GcCell::allocate(
+        Self(GcCell::new(
             gc_context,
             NetStreamData {
                 buffer: Arc::new(Mutex::new(Vec::new())),

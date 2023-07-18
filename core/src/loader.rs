@@ -17,7 +17,7 @@ use crate::bitmap::bitmap_data::Color;
 use crate::bitmap::bitmap_data::{BitmapData, BitmapDataWrapper};
 use crate::context::{ActionQueue, ActionType, UpdateContext};
 use crate::display_object::{
-    DisplayObject, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
+    DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
 };
 use crate::events::ClipEvent;
 use crate::frame_lifecycle::catchup_display_object_to_frame;
@@ -28,7 +28,7 @@ use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use encoding_rs::UTF_8;
-use gc_arena::{Collect, CollectionContext, GcCell};
+use gc_arena::{Collect, GcCell};
 use generational_arena::{Arena, Index};
 use ruffle_render::utils::{determine_jpeg_tag_format, JpegTagFormat};
 use std::fmt;
@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use swf::read::{extract_swz, read_compression_type};
 use thiserror::Error;
-use url::form_urlencoded;
+use url::{form_urlencoded, ParseError, Url};
 
 pub type Handle = Index;
 
@@ -153,6 +153,9 @@ pub enum Error {
     #[error("Non-NetStream loader spawned as NetStream loader")]
     NotNetStreamLoader,
 
+    #[error("Other Loader spawned as Movie unloader")]
+    NotMovieUnloader,
+
     #[error("HTTP Status is not OK: {0} redirected: {1}")]
     HttpNotOk(String, u16, bool),
 
@@ -192,7 +195,7 @@ impl From<crate::avm1::Error<'_>> for Error {
 pub struct LoadManager<'gc>(Arena<Loader<'gc>>);
 
 unsafe impl<'gc> Collect for LoadManager<'gc> {
-    fn trace(&self, cc: CollectionContext) {
+    fn trace(&self, cc: &gc_arena::Collection) {
         for (_, loader) in self.0.iter() {
             loader.trace(cc)
         }
@@ -220,7 +223,8 @@ impl<'gc> LoadManager<'gc> {
             | Loader::LoadURLLoader { self_handle, .. }
             | Loader::SoundAvm1 { self_handle, .. }
             | Loader::SoundAvm2 { self_handle, .. }
-            | Loader::NetStream { self_handle, .. } => *self_handle = Some(handle),
+            | Loader::NetStream { self_handle, .. }
+            | Loader::MovieUnloader { self_handle, .. } => *self_handle = Some(handle),
         }
         handle
     }
@@ -587,6 +591,16 @@ pub enum Loader<'gc> {
         /// The stream to buffer data into.
         target_stream: NetStream<'gc>,
     },
+
+    /// Loader that is unloading a MovieClip.
+    MovieUnloader {
+        /// The handle to refer to this loader instance.
+        #[collect(require_static)]
+        self_handle: Option<Handle>,
+
+        /// The target MovieClip to unload.
+        target_clip: DisplayObject<'gc>,
+    },
 }
 
 impl<'gc> Loader<'gc> {
@@ -674,7 +688,7 @@ impl<'gc> Loader<'gc> {
                     .unwrap()
                     .ui()
                     .display_root_movie_download_failed_message();
-                error
+                error.error
             })?;
 
             // The spoofed root movie URL takes precedence over the actual URL.
@@ -715,13 +729,15 @@ impl<'gc> Loader<'gc> {
             Loader::Movie { self_handle, .. } => self_handle.expect("Loader not self-introduced"),
             _ => return Box::pin(async { Err(Error::NotMovieLoader) }),
         };
-        let request_url = request.url().to_string();
 
         let player = player
             .upgrade()
             .expect("Could not upgrade weak reference to player");
 
         Box::pin(async move {
+            let request_url = request.url().to_string();
+            let resolved_url = player.lock().unwrap().navigator().resolve_url(&request_url);
+
             let fetch = player.lock().unwrap().navigator().fetch(request);
 
             let mut replacing_root_movie = false;
@@ -738,12 +754,13 @@ impl<'gc> Loader<'gc> {
                     .map(|root| DisplayObject::ptr_eq(clip, root))
                     .unwrap_or(false);
 
-                if let Some(mc) = clip.as_movie_clip() {
+                if let Some(mut mc) = clip.as_movie_clip() {
                     if !uc.is_action_script_3() {
                         mc.avm1_unload(uc);
                     }
 
-                    mc.replace_with_movie(uc, None, None);
+                    // Before the actual SWF is loaded, an initial loading state is entered.
+                    Loader::load_initial_loading_swf(&mut mc, uc, &request_url, resolved_url);
                 }
 
                 Loader::movie_loader_start(handle, uc)
@@ -768,13 +785,17 @@ impl<'gc> Loader<'gc> {
                         loader_url,
                     )?;
                 }
-                Err(e) => {
-                    tracing::error!("Error during movie loading of {request_url:?}: {e:?}");
+                Err(response) => {
+                    tracing::error!(
+                        "Error during movie loading of {:?}: {:?}",
+                        response.url,
+                        response.error
+                    );
                     player.lock().unwrap().update(|uc| -> Result<(), Error> {
                         // FIXME - match Flash's error message
 
                         let (status_code, redirected) =
-                            if let Error::HttpNotOk(_, status_code, redirected) = e {
+                            if let Error::HttpNotOk(_, status_code, redirected) = response.error {
                                 (status_code, redirected)
                             } else {
                                 (0, false)
@@ -785,6 +806,7 @@ impl<'gc> Loader<'gc> {
                             "Movie loader error".into(),
                             status_code,
                             redirected,
+                            response.url,
                         )
                     })?;
                 }
@@ -864,7 +886,7 @@ impl<'gc> Loader<'gc> {
         Box::pin(async move {
             let fetch = player.lock().unwrap().navigator().fetch(request);
 
-            let response = fetch.await?;
+            let response = fetch.await.map_err(|e| e.error)?;
 
             // Fire the load handler.
             player.lock().unwrap().update(|uc| {
@@ -976,14 +998,15 @@ impl<'gc> Loader<'gc> {
                             ExecutionReason::Special,
                         );
                     }
-                    Err(err) => {
+                    Err(response) => {
                         // TODO: Log "Error opening URL" trace similar to the Flash Player?
 
-                        let status_code = if let Error::HttpNotOk(_, status_code, _) = err {
-                            status_code
-                        } else {
-                            0
-                        };
+                        let status_code =
+                            if let Error::HttpNotOk(_, status_code, _) = response.error {
+                                status_code
+                            } else {
+                                0
+                            };
 
                         let _ = that.call_method(
                             "onHTTPStatus".into(),
@@ -1131,14 +1154,14 @@ impl<'gc> Loader<'gc> {
                         );
                         Avm2::dispatch_event(uc, complete_evt, target);
                     }
-                    Err(err) => {
+                    Err(response) => {
                         // Testing with Flash shoes that the 'data' property is cleared
                         // when an error occurs
 
                         set_data(Vec::new(), &mut activation, target, data_format);
 
                         let (status_code, redirected) =
-                            if let Error::HttpNotOk(_, status_code, redirected) = err {
+                            if let Error::HttpNotOk(_, status_code, redirected) = response.error {
                                 (status_code, redirected)
                             } else {
                                 (0, false)
@@ -1218,6 +1241,7 @@ impl<'gc> Loader<'gc> {
                 };
 
                 let success = data
+                    .map_err(|e| e.error)
                     .and_then(|data| {
                         let handle = uc.audio.register_mp3(&data.body)?;
                         sound_object.set_sound(uc.gc_context, Some(handle));
@@ -1359,8 +1383,8 @@ impl<'gc> Loader<'gc> {
                     Ok(mut response) => {
                         stream.load_buffer(uc, &mut response.body);
                     }
-                    Err(err) => {
-                        stream.report_error(err);
+                    Err(response) => {
+                        stream.report_error(response.error);
                     }
                 }
 
@@ -1470,7 +1494,7 @@ impl<'gc> Loader<'gc> {
                 ContentType::Gif | ContentType::Jpeg | ContentType::Png => {
                     Arc::new(SwfMovie::from_loaded_image(url.clone(), length))
                 }
-                ContentType::Unknown => Arc::new(SwfMovie::empty(activation.context.swf.version())),
+                ContentType::Unknown => Arc::new(SwfMovie::error_movie(url.clone())),
             };
 
             match activation.context.load_manager.get_loader_mut(handle) {
@@ -1573,7 +1597,7 @@ impl<'gc> Loader<'gc> {
                         transparency,
                         bitmap.as_colors().map(Color::from).collect(),
                     );
-                    let bitmapdata_wrapper = BitmapDataWrapper::new(GcCell::allocate(
+                    let bitmapdata_wrapper = BitmapDataWrapper::new(GcCell::new(
                         activation.context.gc_context,
                         bitmap_data,
                     ));
@@ -1619,9 +1643,15 @@ impl<'gc> Loader<'gc> {
                             ),
                             status,
                             redirected,
+                            url,
                         )?;
                     } else {
-                        // AVM1 fires the event with the current and total length as 0, ignoring the actual values
+                        // If the file is no valid supported file, the MovieClip enters the error state
+                        if let Some(mut mc) = clip.as_movie_clip() {
+                            Loader::load_error_swf(&mut mc, &mut activation.context, url.clone());
+                        }
+
+                        // AVM1 fires the event with the current and total length as 0
                         Loader::movie_loader_progress(handle, &mut activation.context, 0, 0)?;
                         Loader::movie_loader_complete(
                             handle,
@@ -1790,6 +1820,10 @@ impl<'gc> Loader<'gc> {
                 let mc = target_clip.as_movie_clip().unwrap();
                 mc.replace_with_movie(uc, Some(movie.unwrap()), None);
                 mc.replace_at_depth(uc, dobj, 1);
+
+                // This sets the MovieClip image state correctly.
+                mc.set_current_frame(uc.gc_context, 1);
+                mc.set_cur_preload_frame(uc.gc_context, 2);
             }
         }
 
@@ -1841,6 +1875,7 @@ impl<'gc> Loader<'gc> {
         msg: AvmString<'gc>,
         status: u16,
         redirected: bool,
+        swf_url: String,
     ) -> Result<(), Error> {
         //TODO: Inspect the fetch error.
         //This requires cooperation from the backend to send abstract
@@ -1856,6 +1891,11 @@ impl<'gc> Loader<'gc> {
             None => return Err(Error::Cancelled),
             _ => unreachable!(),
         };
+
+        // If the SWF can't be loaded, the MovieClip enters the error state
+        if let Some(mut mc) = clip.as_movie_clip() {
+            Loader::load_error_swf(&mut mc, uc, swf_url);
+        }
 
         match vm_data {
             MovieLoaderVMData::Avm1 { broadcaster } => {
@@ -1920,6 +1960,76 @@ impl<'gc> Loader<'gc> {
         };
 
         Ok(())
+    }
+
+    /// This makes the MovieClip enter the initial loading state in which some
+    /// attributes have certain initial loading values to signal that the file is
+    /// currently being loaded and neither an error has occurred nor the first frame
+    /// has been successfully loaded yet.
+    fn load_initial_loading_swf(
+        mc: &mut MovieClip<'gc>,
+        uc: &mut UpdateContext<'_, 'gc>,
+        request_url: &str,
+        resolved_url: Result<Url, ParseError>,
+    ) {
+        match resolved_url {
+            Err(_) => {
+                Loader::load_error_swf(mc, uc, request_url.to_string());
+            }
+            Ok(url) => {
+                // If the loaded SWF is a local file, the initial loading state equals the error state.
+                if url.scheme() == "file" {
+                    Loader::load_error_swf(mc, uc, url.to_string());
+                } else {
+                    // Replacing the movie sets total_frames and and frames_loaded correctly.
+                    // The movie just needs to be the default empty movie with the correct URL.
+                    // In this loading state, the URL is the URL of the parent movie / doesn't change.
+
+                    let current_movie = mc.movie();
+                    let current_version = current_movie.version();
+                    let current_url = current_movie.url();
+                    let mut initial_loading_movie = SwfMovie::empty(current_version);
+                    initial_loading_movie.set_url(current_url.to_string());
+
+                    mc.replace_with_movie(uc, Some(Arc::new(initial_loading_movie)), None);
+
+                    // Maybe this (keeping the current URL) should be the default behaviour
+                    // of replace_with_movie?
+                    // TODO: See where it gets invoked without a movie as well and what the
+                    // correct URL result is in these cases.
+                }
+            }
+        }
+    }
+
+    /// This makes the MovieClip enter the error state in which some attributes have
+    /// certain error values to signal that no valid file could be loaded.
+    /// An error state movie stub which provides the correct values is created and
+    /// loaded.
+    ///
+    /// This happens if no file could be loaded or if the loaded content is no valid
+    /// supported content.
+    ///
+    /// swf_url is always the final URL obtained after any redirects.
+    fn load_error_swf(
+        mc: &mut MovieClip<'gc>,
+        uc: &mut UpdateContext<'_, 'gc>,
+        mut swf_url: String,
+    ) {
+        // If a local URL is fetched using the flash plugin, the _url property
+        // won't be changed => It keeps being the parent SWF URL.
+        if cfg!(target_family = "wasm") {
+            if let Ok(url) = Url::parse(&swf_url) {
+                if url.scheme() == "file" {
+                    swf_url = mc.movie().url().to_string();
+                }
+            }
+        };
+
+        let error_movie = SwfMovie::error_movie(swf_url);
+        // This also sets total_frames correctly
+        mc.replace_with_movie(uc, Some(Arc::new(error_movie)), None);
+        mc.set_cur_preload_frame(uc.gc_context, 0);
     }
 
     /// Event handler morally equivalent to `onLoad` on a movie clip.

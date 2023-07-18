@@ -59,7 +59,7 @@ pub(crate) mod text_field;
 mod text_format;
 pub(crate) mod transform;
 mod video;
-mod xml;
+pub(crate) mod xml;
 mod xml_node;
 
 const GLOBAL_DECLS: &[Declaration] = declare_properties! {
@@ -475,7 +475,7 @@ pub struct SystemPrototypes<'gc> {
     pub text_format: Object<'gc>,
     pub array: Object<'gc>,
     pub array_constructor: Object<'gc>,
-    pub xml_node: Object<'gc>,
+    pub xml_node_constructor: Object<'gc>,
     pub xml_constructor: Object<'gc>,
     pub string: Object<'gc>,
     pub number: Object<'gc>,
@@ -487,7 +487,6 @@ pub struct SystemPrototypes<'gc> {
     pub rectangle: Object<'gc>,
     pub rectangle_constructor: Object<'gc>,
     pub transform_constructor: Object<'gc>,
-    pub shared_object: Object<'gc>,
     pub shared_object_constructor: Object<'gc>,
     pub color_transform: Object<'gc>,
     pub color_transform_constructor: Object<'gc>,
@@ -541,8 +540,6 @@ pub fn create_globals<'gc>(
     let error_proto = error::create_proto(context, object_proto, function_proto);
 
     let xmlnode_proto = xml_node::create_proto(context, object_proto, function_proto);
-
-    let xml_proto = xml::create_proto(context, xmlnode_proto, function_proto);
 
     let string_proto = string::create_proto(context, object_proto, function_proto);
     let number_proto = number::create_proto(context, object_proto, function_proto);
@@ -666,13 +663,7 @@ pub fn create_globals<'gc>(
         function_proto,
         xmlnode_proto,
     );
-    let xml = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(xml::constructor),
-        constructor_to_fn!(xml::constructor),
-        function_proto,
-        xml_proto,
-    );
+    let xml = xml::create_constructor(context, xmlnode_proto, function_proto);
     let string = string::create_string_object(context, string_proto, function_proto);
     let number = number::create_number_object(context, number_proto, function_proto);
     let boolean = boolean::create_boolean_object(context, boolean_proto, function_proto);
@@ -932,14 +923,11 @@ pub fn create_globals<'gc>(
     globals.define_value(gc_context, "Boolean", boolean.into(), Attribute::DONT_ENUM);
     globals.define_value(gc_context, "Date", date.into(), Attribute::DONT_ENUM);
 
-    let shared_object_proto = shared_object::create_proto(context, object_proto, function_proto);
-
-    let shared_obj =
-        shared_object::create_shared_object_object(context, shared_object_proto, function_proto);
+    let shared_object = shared_object::create_constructor(context, object_proto, function_proto);
     globals.define_value(
         gc_context,
         "SharedObject",
-        shared_obj.into(),
+        shared_object.into(),
         Attribute::DONT_ENUM,
     );
 
@@ -1078,7 +1066,7 @@ pub fn create_globals<'gc>(
             text_format: text_format_proto,
             array: array_proto,
             array_constructor: array,
-            xml_node: xmlnode_proto,
+            xml_node_constructor: xmlnode,
             xml_constructor: xml,
             string: string_proto,
             number: number_proto,
@@ -1090,8 +1078,7 @@ pub fn create_globals<'gc>(
             rectangle: rectangle_proto,
             rectangle_constructor: rectangle,
             transform_constructor: transform,
-            shared_object: shared_object_proto,
-            shared_object_constructor: shared_obj,
+            shared_object_constructor: shared_object,
             color_transform: color_transform_proto,
             color_transform_constructor: color_transform,
             context_menu: context_menu_proto,

@@ -7,14 +7,15 @@ use isahc::{
 };
 use rfd::{MessageButtons, MessageDialog, MessageLevel};
 use ruffle_core::backend::navigator::{
-    NavigationMethod, NavigatorBackend, OpenURLMode, OwnedFuture, Request, Response,
+    async_return, create_fetch_error, create_specific_fetch_error, ErrorResponse, NavigationMethod,
+    NavigatorBackend, OpenURLMode, OwnedFuture, Request, SuccessResponse,
 };
 use ruffle_core::indexmap::IndexMap;
 use ruffle_core::loader::Error;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::mpsc::Sender;
-use url::Url;
+use url::{ParseError, Url};
 use winit::event_loop::EventLoopProxy;
 
 /// Implementation of `NavigatorBackend` for non-web environments that can call
@@ -82,7 +83,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
 
         //NOTE: Flash desktop players / projectors ignore the window parameter,
         //      unless it's a `_layer`, and we shouldn't handle that anyway.
-        let mut parsed_url = match self.base_url.join(url) {
+        let mut parsed_url = match self.resolve_url(url) {
             Ok(parsed_url) => parsed_url,
             Err(e) => {
                 tracing::error!(
@@ -110,9 +111,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
             None => parsed_url,
         };
 
-        let processed_url = self.pre_process_url(modified_url);
-
-        if processed_url.scheme() == "javascript" {
+        if modified_url.scheme() == "javascript" {
             tracing::warn!(
                 "SWF tried to run a script on desktop, but javascript calls are not allowed"
             );
@@ -120,7 +119,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
         }
 
         if self.open_url_mode == OpenURLMode::Confirm {
-            let message = format!("The SWF file wants to open the website {}", processed_url);
+            let message = format!("The SWF file wants to open the website {}", modified_url);
             // TODO: Add a checkbox with a GUI toolkit
             let confirm = MessageDialog::new()
                 .set_title("Open website?")
@@ -138,23 +137,25 @@ impl NavigatorBackend for ExternalNavigatorBackend {
         }
 
         // If the user confirmed or if in Allow mode, open the website
-        match webbrowser::open(processed_url.as_ref()) {
+
+        // TODO: This opens local files in the browser while flash opens them
+        // in the default program for the respective filetype.
+        // This especially includes mailto links. Ruffle opens the browser which opens
+        // the preferred program while flash opens the preferred program directly.
+        match webbrowser::open(modified_url.as_ref()) {
             Ok(_output) => {}
-            Err(e) => tracing::error!("Could not open URL {}: {}", processed_url.as_str(), e),
+            Err(e) => tracing::error!("Could not open URL {}: {}", modified_url.as_str(), e),
         };
     }
 
-    fn fetch(&self, request: Request) -> OwnedFuture<Response, Error> {
+    fn fetch(&self, request: Request) -> OwnedFuture<SuccessResponse, ErrorResponse> {
         // TODO: honor sandbox type (local-with-filesystem, local-with-network, remote, ...)
-        let full_url = match self.base_url.join(request.url()) {
+        let mut processed_url = match self.resolve_url(request.url()) {
             Ok(url) => url,
             Err(e) => {
-                let msg = format!("Invalid URL {}: {e}", request.url());
-                return Box::pin(async move { Err(Error::FetchError(msg)) });
+                return async_return(create_fetch_error(request.url(), e));
             }
         };
-
-        let mut processed_url = self.pre_process_url(full_url);
 
         let client = self.client.clone();
 
@@ -168,9 +169,18 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                 // when we actually load a filesystem url, strip them out.
                 processed_url.set_query(None);
 
-                let path = processed_url.to_file_path().unwrap_or_default();
+                let path = match processed_url.to_file_path() {
+                    Ok(path) => path,
+                    Err(_) => {
+                        return create_specific_fetch_error(
+                            "Unable to create path out of URL",
+                            response_url.as_str(),
+                            "",
+                        )
+                    }
+                };
 
-                let body = std::fs::read(&path).or_else(|e| {
+                let body = match std::fs::read(&path).or_else(|e| {
                     if cfg!(feature = "sandbox") {
                         use rfd::FileDialog;
                         use std::io::ErrorKind;
@@ -191,9 +201,12 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                     }
 
                     Err(e)
-                }).map_err(|e| Error::FetchError(e.to_string()))?;
+                }) {
+                    Ok(body) => body,
+                    Err(e) => return create_specific_fetch_error("Can't open file", response_url.as_str(), e)
+                };
 
-                Ok(Response {
+                Ok(SuccessResponse {
                     url: response_url.to_string(),
                     body,
                     status: 0,
@@ -201,8 +214,10 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                 })
             }),
             _ => Box::pin(async move {
-                let client =
-                    client.ok_or_else(|| Error::FetchError("Network unavailable".to_string()))?;
+                let client = client.ok_or_else(|| ErrorResponse {
+                    url: processed_url.to_string(),
+                    error: Error::FetchError("Network unavailable".to_string()),
+                })?;
 
                 let mut isahc_request = match request.method() {
                     NavigationMethod::Get => IsahcRequest::get(processed_url.to_string()),
@@ -211,33 +226,28 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                 if let Some(headers) = isahc_request.headers_mut() {
                     for (name, val) in request.headers().iter() {
                         headers.insert(
-                            HeaderName::from_str(name)
-                                .map_err(|e| Error::FetchError(e.to_string()))?,
-                            HeaderValue::from_str(val)
-                                .map_err(|e| Error::FetchError(e.to_string()))?,
+                            HeaderName::from_str(name).map_err(|e| ErrorResponse {
+                                url: processed_url.to_string(),
+                                error: Error::FetchError(e.to_string()),
+                            })?,
+                            HeaderValue::from_str(val).map_err(|e| ErrorResponse {
+                                url: processed_url.to_string(),
+                                error: Error::FetchError(e.to_string()),
+                            })?,
                         );
                     }
                 }
 
                 let (body_data, _) = request.body().clone().unwrap_or_default();
-                let body = isahc_request
-                    .body(body_data)
-                    .map_err(|e| Error::FetchError(e.to_string()))?;
+                let body = isahc_request.body(body_data).map_err(|e| ErrorResponse {
+                    url: processed_url.to_string(),
+                    error: Error::FetchError(e.to_string()),
+                })?;
 
-                let mut response = client
-                    .send_async(body)
-                    .await
-                    .map_err(|e| Error::FetchError(e.to_string()))?;
-
-                let status = response.status().as_u16();
-                let redirected = response.effective_uri().is_some();
-                if !response.status().is_success() {
-                    return Err(Error::HttpNotOk(
-                        format!("HTTP status is not ok, got {}", response.status()),
-                        status,
-                        redirected,
-                    ));
-                }
+                let mut response = client.send_async(body).await.map_err(|e| ErrorResponse {
+                    url: processed_url.to_string(),
+                    error: Error::FetchError(e.to_string()),
+                })?;
 
                 let url = if let Some(uri) = response.effective_uri() {
                     uri.to_string()
@@ -245,19 +255,40 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                     processed_url.into()
                 };
 
+                let status = response.status().as_u16();
+                let redirected = response.effective_uri().is_some();
+                if !response.status().is_success() {
+                    let error = Error::HttpNotOk(
+                        format!("HTTP status is not ok, got {}", response.status()),
+                        status,
+                        redirected,
+                    );
+                    return Err(ErrorResponse { url, error });
+                }
+
                 let mut body = vec![];
                 response
                     .copy_to(&mut body)
                     .await
-                    .map_err(|e| Error::FetchError(e.to_string()))?;
+                    .map_err(|e| ErrorResponse {
+                        url: url.clone(),
+                        error: Error::FetchError(e.to_string()),
+                    })?;
 
-                Ok(Response {
+                Ok(SuccessResponse {
                     url,
                     body,
                     status,
                     redirected,
                 })
             }),
+        }
+    }
+
+    fn resolve_url(&self, url: &str) -> Result<Url, ParseError> {
+        match self.base_url.join(url) {
+            Ok(url) => Ok(self.pre_process_url(url)),
+            Err(error) => Err(error),
         }
     }
 

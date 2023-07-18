@@ -12,7 +12,7 @@ pub struct FocusTracker<'gc>(GcCell<'gc, Option<DisplayObject<'gc>>>);
 
 impl<'gc> FocusTracker<'gc> {
     pub fn new(gc_context: MutationContext<'gc, '_>) -> Self {
-        Self(GcCell::allocate(gc_context, None))
+        Self(GcCell::new(gc_context, None))
     }
 
     pub fn get(&self) -> Option<DisplayObject<'gc>> {
@@ -59,12 +59,13 @@ impl<'gc> FocusTracker<'gc> {
         // This applies even if the focused element hasn't changed.
         if let Some(text_field) = focused_element.and_then(|e| e.as_edit_text()) {
             if text_field.is_editable() {
-                let length = text_field.text_length();
-                text_field.set_selection(
-                    Some(TextSelection::for_range(0, length)),
-                    context.gc_context,
-                );
-
+                if !text_field.movie().is_action_script_3() {
+                    let length = text_field.text_length();
+                    text_field.set_selection(
+                        Some(TextSelection::for_range(0, length)),
+                        context.gc_context,
+                    );
+                }
                 context.ui.open_virtual_keyboard();
             }
         }

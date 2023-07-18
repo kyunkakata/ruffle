@@ -6,7 +6,6 @@ mod tests;
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use downcast_rs::{impl_downcast, Downcast};
-use gc_arena::Collect;
 use num_traits::FromPrimitive;
 use std::{
     fmt::{Debug, Display, Formatter},
@@ -20,8 +19,7 @@ use crate::{backend::RawTexture, bitmap::BitmapHandle};
 /// of the pixel being processed.
 pub const OUT_COORD_NAME: &str = "_OutCoord";
 
-#[derive(Clone, Debug, Collect)]
-#[collect(require_static)]
+#[derive(Clone, Debug)]
 pub struct PixelBenderShaderHandle(pub Arc<dyn PixelBenderShaderImpl>);
 
 pub trait PixelBenderShaderImpl: Downcast + Debug {
@@ -93,6 +91,18 @@ pub struct PixelBenderReg {
     pub index: u32,
     pub channels: Vec<PixelBenderRegChannel>,
     pub kind: PixelBenderRegKind,
+}
+
+impl PixelBenderReg {
+    pub fn is_scalar(&self) -> bool {
+        self.channels.len() == 1
+            && !matches!(
+                self.channels[0],
+                PixelBenderRegChannel::M2x2
+                    | PixelBenderRegChannel::M3x3
+                    | PixelBenderRegChannel::M4x4
+            )
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]

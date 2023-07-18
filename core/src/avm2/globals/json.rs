@@ -235,13 +235,15 @@ impl<'gc> AvmSerializer<'gc> {
                     )?));
                 }
                 self.obj_stack.push(obj);
-                let value =
-                    if obj.is_of_type(activation.avm2().classes().array, &mut activation.context) {
-                        // TODO: Vectors
-                        self.serialize_iterable(activation, obj)?
-                    } else {
-                        self.serialize_object(activation, obj)?
-                    };
+                let value = if obj.is_of_type(
+                    activation.avm2().classes().array.inner_class_definition(),
+                    &mut activation.context,
+                ) {
+                    // TODO: Vectors
+                    self.serialize_iterable(activation, obj)?
+                } else {
+                    self.serialize_object(activation, obj)?
+                };
                 self.obj_stack
                     .pop()
                     .expect("Stack underflow during JSON serialization");
@@ -264,7 +266,7 @@ impl<'gc> AvmSerializer<'gc> {
 /// Implements `JSON.parse`.
 pub fn parse<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let input = args.get_string(activation, 0)?;
@@ -286,7 +288,7 @@ pub fn parse<'gc>(
 /// Implements `JSON.stringify`.
 pub fn stringify<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let val = args.get_value(0);

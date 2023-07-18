@@ -31,6 +31,8 @@ use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult};
 use crate::font::Font;
 use crate::limits::ExecutionLimit;
+use crate::loader;
+use crate::loader::Loader;
 use crate::prelude::*;
 use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
 use crate::tag_utils::{self, ControlFlow, DecodeResult, Error, SwfMovie, SwfSlice, SwfStream};
@@ -39,6 +41,7 @@ use core::fmt;
 use gc_arena::{Collect, Gc, GcCell, GcWeakCell, MutationContext};
 use smallvec::SmallVec;
 use std::cell::{Ref, RefMut};
+use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::Arc;
 use swf::extensions::ReadSwfExt;
@@ -66,6 +69,50 @@ enum NextFrame {
 /// However, in AVM2, Sprite is a separate display object, and MovieClip is a subclass of Sprite.
 ///
 /// (SWF19 pp. 201-203)
+///
+/// # MovieClip States
+/// A MovieClip can be in different states.
+/// The state of a MovieClip consists of the values of all properties and the results of some getter
+/// functions of the MovieClip.
+/// Most of these states are inaccessible in AVM2.
+///
+/// The states a MovieClip can be in are the following:
+///
+/// ## Default State
+/// This is the default state a MovieClip is in after it's created (in AVM1 with createEmptyMovieClip).
+///
+/// ## Initial Loading State
+/// This state is entered when FP / Ruffle try to load the MovieClip. As soon as FP / Ruffle either
+/// load the first frame of the SWF or realise the movie can't be loaded, a different state is
+/// entered.
+///
+/// Therefore, if FP / Ruffle are too fast to determine whether the file exists or not, the state
+/// can directly change after one frame from the default state to a different state.
+///
+/// The initial loading state is different, depending on whether the SWF file which is loading is
+/// an online file or a local file.
+///
+/// ## Error State
+/// This state is entered if no file could be loaded or if the loaded content is no valid supported
+/// content.
+///
+/// ## Image State
+/// This state is entered if an image has been loaded.
+///
+/// ## Success State
+/// This state is entered if the first frame of a valid SWF file has been loaded.
+///
+/// ## Unloaded State
+/// This state is entered on the next frame after the movie has been unloaded.
+///
+/// ## States in AVM2
+/// In AVM2, only the success state is accessible to the ActionScript code. The Ruffle MovieClip
+/// can still be in the default state, initial loading state and error state, however it is only
+/// passed to the code (via the ActionScript Loader) after it has reached the success state. If
+/// an image is loaded in AVM2, the ActionScript code doesn't get any MovieClip object, even if
+/// the MovieClip exists in Ruffle and is in the image state.
+///
+/// The unloaded state can only be reached in AVM1 through the unloadMovie function.
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct MovieClip<'gc>(GcCell<'gc, MovieClipData<'gc>>);
@@ -137,11 +184,11 @@ pub struct MovieClipData<'gc> {
 
 impl<'gc> MovieClip<'gc> {
     pub fn new(movie: Arc<SwfMovie>, gc_context: MutationContext<'gc, '_>) -> Self {
-        MovieClip(GcCell::allocate(
+        MovieClip(GcCell::new(
             gc_context,
             MovieClipData {
                 base: Default::default(),
-                static_data: Gc::allocate(gc_context, MovieClipStatic::empty(movie, gc_context)),
+                static_data: Gc::new(gc_context, MovieClipStatic::empty(movie, gc_context)),
                 tag_stream_pos: 0,
                 current_frame: 0,
                 audio_stream: None,
@@ -176,11 +223,11 @@ impl<'gc> MovieClip<'gc> {
         class: Avm2ClassObject<'gc>,
         gc_context: MutationContext<'gc, '_>,
     ) -> Self {
-        MovieClip(GcCell::allocate(
+        MovieClip(GcCell::new(
             gc_context,
             MovieClipData {
                 base: Default::default(),
-                static_data: Gc::allocate(gc_context, MovieClipStatic::empty(movie, gc_context)),
+                static_data: Gc::new(gc_context, MovieClipStatic::empty(movie, gc_context)),
                 tag_stream_pos: 0,
                 current_frame: 0,
                 audio_stream: None,
@@ -216,11 +263,11 @@ impl<'gc> MovieClip<'gc> {
         swf: SwfSlice,
         num_frames: u16,
     ) -> Self {
-        MovieClip(GcCell::allocate(
+        MovieClip(GcCell::new(
             gc_context,
             MovieClipData {
                 base: Default::default(),
-                static_data: Gc::allocate(
+                static_data: Gc::new(
                     gc_context,
                     MovieClipStatic::with_data(id, swf, num_frames, None, gc_context),
                 ),
@@ -275,11 +322,11 @@ impl<'gc> MovieClip<'gc> {
             None
         };
 
-        let mc = MovieClip(GcCell::allocate(
+        let mc = MovieClip(GcCell::new(
             activation.context.gc_context,
             MovieClipData {
                 base: Default::default(),
-                static_data: Gc::allocate(
+                static_data: Gc::new(
                     activation.context.gc_context,
                     MovieClipStatic::with_data(
                         0,
@@ -357,7 +404,7 @@ impl<'gc> MovieClip<'gc> {
         );
 
         mc.base.base.reset_for_movie_load();
-        mc.static_data = Gc::allocate(
+        mc.static_data = Gc::new(
             context.gc_context,
             MovieClipStatic::with_data(
                 0,
@@ -682,8 +729,7 @@ impl<'gc> MovieClip<'gc> {
                 .unwrap();
         }
 
-        self.0.write(context.gc_context).static_data =
-            Gc::allocate(context.gc_context, static_data);
+        self.0.write(context.gc_context).static_data = Gc::new(context.gc_context, static_data);
 
         is_finished
     }
@@ -1017,7 +1063,7 @@ impl<'gc> MovieClip<'gc> {
     }
 
     pub fn current_frame(self) -> FrameNumber {
-        self.0.read().current_frame
+        self.0.read().current_frame()
     }
 
     /// Return the current scene.
@@ -1174,7 +1220,7 @@ impl<'gc> MovieClip<'gc> {
     }
 
     pub fn total_frames(self) -> FrameNumber {
-        self.0.read().static_data.total_frames
+        self.0.read().total_frames()
     }
 
     #[allow(dead_code)]
@@ -1187,23 +1233,41 @@ impl<'gc> MovieClip<'gc> {
             .unwrap_or_default()
     }
 
-    pub fn frames_loaded(self) -> FrameNumber {
+    /// This sets the current preload frame of this MovieClipto a given number (resulting
+    /// in the _framesloaded / framesLoaded property being the given number - 1).
+    pub fn set_cur_preload_frame(
+        self,
+        gc_context: MutationContext<'gc, '_>,
+        cur_preload_frame: u16,
+    ) {
         self.0
             .read()
             .static_data
             .preload_progress
-            .read()
-            .cur_preload_frame
-            .saturating_sub(1)
+            .write(gc_context)
+            .cur_preload_frame = cur_preload_frame;
     }
 
-    pub fn total_bytes(self) -> u32 {
+    /// This sets the current frame of this MovieClip to a given number.
+    pub fn set_current_frame(
+        self,
+        gc_context: MutationContext<'gc, '_>,
+        current_frame: FrameNumber,
+    ) {
+        self.0.write(gc_context).current_frame = current_frame;
+    }
+
+    pub fn frames_loaded(self) -> i32 {
+        self.0.read().frames_loaded()
+    }
+
+    pub fn total_bytes(self) -> i32 {
         // For a loaded SWF, returns the uncompressed size of the SWF.
         // Otherwise, returns the size of the tag list in the clip's DefineSprite tag.
         if self.is_root() {
             self.movie().uncompressed_len()
         } else {
-            self.tag_stream_len() as u32
+            self.tag_stream_len() as i32
         }
     }
 
@@ -1212,10 +1276,10 @@ impl<'gc> MovieClip<'gc> {
         let progress_read = read.static_data.preload_progress.read();
         if progress_read.next_preload_chunk == u64::MAX {
             // u64::MAX is a sentinel for load complete
-            return self.total_bytes();
+            return max(self.total_bytes(), 0) as u32;
         }
 
-        let swf_header_size = self.total_bytes() - self.tag_stream_len() as u32;
+        let swf_header_size = max(self.total_bytes(), 0) as u32 - self.tag_stream_len() as u32;
 
         swf_header_size + progress_read.next_preload_chunk as u32
     }
@@ -1739,7 +1803,7 @@ impl<'gc> MovieClip<'gc> {
         let mut index = 0;
 
         // Sanity; let's make sure we don't seek way too far.
-        let clamped_frame = frame.min(mc.frames_loaded());
+        let clamped_frame = frame.min(max(mc.frames_loaded(), 0) as FrameNumber);
         drop(mc);
 
         let mut removed_frame_scripts: Vec<DisplayObject<'gc>> = vec![];
@@ -2060,6 +2124,7 @@ impl<'gc> MovieClip<'gc> {
     /// This function does *not* call the constructor; it is intended that you
     /// will construct the object first before doing so. This function is
     /// intended to be called from `construct_frame`.
+    #[inline(never)]
     fn allocate_as_avm2_object(
         self,
         context: &mut UpdateContext<'_, 'gc>,
@@ -2093,6 +2158,7 @@ impl<'gc> MovieClip<'gc> {
     /// This function does *not* allocate the object; it is intended that you
     /// will allocate the object first before doing so. This function is
     /// intended to be called from `post_instantiate`.
+    #[inline(never)]
     fn construct_as_avm2_object(self, context: &mut UpdateContext<'_, 'gc>) {
         let class_object = self
             .0
@@ -2349,6 +2415,72 @@ impl<'gc> MovieClip<'gc> {
 
         unqueued
     }
+
+    /// This unloads the MovieClip.
+    ///
+    /// This means that one frame after this method has been called, avm1_unload and
+    /// transform_to_unloaded_state get called and the MovieClip enters the unloaded
+    /// state in which some attributes have certain values.
+    // TODO: Look at where avm1_unload gets called directly. Does Flash also execute these
+    // calls with one frame delay? Does transform_to_unloaded_state need to get executed
+    // after one frame if the target is a MovieClip? Test the behaviour and adapt the code
+    // if necessary.
+    pub fn avm1_unload_movie(&self, context: &mut UpdateContext<'_, 'gc>) {
+        let unloader = Loader::MovieUnloader {
+            self_handle: None,
+            target_clip: DisplayObject::MovieClip(*self),
+        };
+        let handle = context.load_manager.add_loader(unloader);
+
+        let player = context
+            .player
+            .clone()
+            .upgrade()
+            .expect("Could not upgrade weak reference to player");
+        let future = Box::pin(async move {
+            player
+                .lock()
+                .unwrap()
+                .update(|uc| -> Result<(), loader::Error> {
+                    let clip = match uc.load_manager.get_loader(handle) {
+                        Some(Loader::MovieUnloader { target_clip, .. }) => *target_clip,
+                        _ => unreachable!(),
+                    };
+                    if let Some(mc) = clip.as_movie_clip() {
+                        mc.avm1_unload(uc);
+                        mc.transform_to_unloaded_state(uc);
+                    }
+
+                    Ok(())
+                })?;
+            Ok(())
+        });
+
+        context.navigator.spawn_future(future);
+    }
+
+    /// This makes the MovieClip enter the unloaded state in which some attributes have
+    /// certain values.
+    /// An unloaded state movie stub which provides the correct values is created and
+    /// loaded.
+    ///
+    /// This happens if a MovieClip has been unloaded. The state is then changed one
+    /// frame after the command to unload the MovieClip has been read.
+    fn transform_to_unloaded_state(&self, context: &mut UpdateContext<'_, 'gc>) {
+        let movie = if let Some(DisplayObject::MovieClip(parent_mc)) = self.parent() {
+            let parent_movie = parent_mc.movie();
+            let parent_version = parent_movie.version();
+            let parent_url = parent_movie.url();
+            let mut unloaded_movie = SwfMovie::empty(parent_version);
+            unloaded_movie.set_url(parent_url.to_string());
+
+            Some(Arc::new(unloaded_movie))
+        } else {
+            None
+        };
+
+        self.replace_with_movie(context, movie, None);
+    }
 }
 
 impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
@@ -2361,7 +2493,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     }
 
     fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
-        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+        Self(GcCell::new(gc_context, self.0.read().clone())).into()
     }
 
     fn as_ptr(&self) -> *const DisplayObjectPtr {
@@ -3160,12 +3292,8 @@ impl<'gc> MovieClipData<'gc> {
         self.static_data.total_frames
     }
 
-    fn frames_loaded(&self) -> FrameNumber {
-        self.static_data
-            .preload_progress
-            .read()
-            .cur_preload_frame
-            .saturating_sub(1)
+    fn frames_loaded(&self) -> i32 {
+        (self.static_data.preload_progress.read().cur_preload_frame) as i32 - 1
     }
 
     fn playing(&self) -> bool {
@@ -4293,9 +4421,9 @@ impl<'gc> MovieClipStatic<'gc> {
             scene_labels_map: HashMap::new(),
             audio_stream_info: None,
             audio_stream_handle: None,
-            exported_name: GcCell::allocate(gc_context, None),
+            exported_name: GcCell::new(gc_context, None),
             loader_info,
-            preload_progress: GcCell::allocate(gc_context, Default::default()),
+            preload_progress: GcCell::new(gc_context, Default::default()),
         }
     }
 }
