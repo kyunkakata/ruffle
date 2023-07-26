@@ -67,13 +67,13 @@ impl WgpuRenderBackend<SwapChainTarget> {
         let surface = instance.create_surface_from_canvas(canvas)?;
         let (adapter, device, queue) = request_adapter_and_device(
             wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-            instance,
+            &instance,
             Some(&surface),
             wgpu::PowerPreference::HighPerformance,
             None,
         )
         .await?;
-        let descriptors = Descriptors::new(adapter, device, queue);
+        let descriptors = Descriptors::new(instance, adapter, device, queue);
         let target =
             SwapChainTarget::new(surface, &descriptors.adapter, (1, 1), &descriptors.device);
         Self::new(Arc::new(descriptors), target)
@@ -102,12 +102,12 @@ impl WgpuRenderBackend<SwapChainTarget> {
         let surface = unsafe { instance.create_surface(window) }?;
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
-            instance,
+            &instance,
             Some(&surface),
             power_preference,
             trace_path,
         ))?;
-        let descriptors = Descriptors::new(adapter, device, queue);
+        let descriptors = Descriptors::new(instance, adapter, device, queue);
         let target = SwapChainTarget::new(surface, &descriptors.adapter, size, &descriptors.device);
         Self::new(Arc::new(descriptors), target)
     }
@@ -133,12 +133,12 @@ impl WgpuRenderBackend<crate::target::TextureTarget> {
         });
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
-            instance,
+            &instance,
             None,
             power_preference,
             trace_path,
         ))?;
-        let descriptors = Descriptors::new(adapter, device, queue);
+        let descriptors = Descriptors::new(instance, adapter, device, queue);
         let target = crate::target::TextureTarget::new(&descriptors.device, size)?;
         Self::new(Arc::new(descriptors), target)
     }
@@ -548,13 +548,20 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.offscreen_texture_pool,
                 );
             } else {
+                // We're relying on there being no impotent filters here,
+                // so that we can safely start by using the actual CAB texture.
+                // It's guaranteed that at least one filter would have used it and moved the target to something else,
+                // letting us safely copy back to it later.
                 let mut target = surface.draw_commands(
-                    RenderTargetMode::FreshWithColor(wgpu::Color {
-                        r: f64::from(entry.clear.r) / 255.0,
-                        g: f64::from(entry.clear.g) / 255.0,
-                        b: f64::from(entry.clear.b) / 255.0,
-                        a: f64::from(entry.clear.a) / 255.0,
-                    }),
+                    RenderTargetMode::ExistingWithColor(
+                        texture.texture.clone(),
+                        wgpu::Color {
+                            r: f64::from(entry.clear.r) / 255.0,
+                            g: f64::from(entry.clear.g) / 255.0,
+                            b: f64::from(entry.clear.b) / 255.0,
+                            a: f64::from(entry.clear.a) / 255.0,
+                        },
+                    ),
                     &self.descriptors,
                     &self.meshes,
                     entry.commands,
@@ -810,6 +817,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 | Filter::DropShadowFilter(_)
                 | Filter::ColorMatrixFilter(_)
                 | Filter::ShaderFilter(_)
+                | Filter::BevelFilter(_)
+                | Filter::DisplacementMapFilter(_)
         )
     }
 
@@ -1031,7 +1040,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
 pub async fn request_adapter_and_device(
     backend: wgpu::Backends,
-    instance: wgpu::Instance,
+    instance: &wgpu::Instance,
     surface: Option<&wgpu::Surface>,
     power_preference: wgpu::PowerPreference,
     trace_path: Option<&Path>,
