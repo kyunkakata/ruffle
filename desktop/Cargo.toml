@@ -8,7 +8,7 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
-clap = { version = "4.3.12", features = ["derive"] }
+clap = { version = "4.3.19", features = ["derive"] }
 cpal = "0.15.2"
 egui = "0.22.0"
 egui-wgpu = { version = "0.22.0", features = ["winit"] }
@@ -37,6 +37,9 @@ wgpu = { workspace = true }
 futures = "0.3.28"
 chrono = { version = "0.4", default-features = false, features = [] }
 fluent-templates = "0.8.0"
+futures-lite = "1.13.0"
+async-io = "1.13.0"
+async-net = "1.7.0"
 
 # Deliberately held back to match tracy client used by profiling crate
 tracing-tracy = { version = "=0.10.2", optional = true }

@@ -6,7 +6,10 @@ use ruffle_core::backend::navigator::{
 };
 use ruffle_core::indexmap::IndexMap;
 use ruffle_core::loader::Error;
+use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 use url::{ParseError, Url};
 
 /// A `NavigatorBackend` used by tests that supports logging fetch requests.
@@ -93,5 +96,23 @@ impl NavigatorBackend for TestNavigatorBackend {
 
     fn pre_process_url(&self, url: Url) -> Url {
         url
+    }
+
+    fn connect_socket(
+        &mut self,
+        host: String,
+        port: u16,
+        _timeout: Duration,
+        handle: SocketHandle,
+        _receiver: Receiver<Vec<u8>>,
+        sender: Sender<SocketAction>,
+    ) {
+        if let Some(log) = &self.log {
+            log.avm_trace("Navigator::connect_socket");
+            log.avm_trace(&format!("    Host: {}; Port: {}", host, port));
+        }
+        sender
+            .send(SocketAction::Connect(handle, ConnectionState::Failed))
+            .expect("working channel send");
     }
 }

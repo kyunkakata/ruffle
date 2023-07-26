@@ -10,7 +10,7 @@ use crate::bitmap::turbulence::Turbulence;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::TDisplayObject;
 use gc_arena::MutationContext;
-use ruffle_render::bitmap::PixelRegion;
+use ruffle_render::bitmap::{PixelRegion, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList};
 use ruffle_render::filters::Filter;
 use ruffle_render::matrix::Matrix;
@@ -109,7 +109,7 @@ pub fn set_pixel<'gc>(
     } else {
         write.set_pixel32_raw(x, y, color.with_alpha(0xFF));
     }
-    write.set_cpu_dirty(PixelRegion::for_whole_size(x, y));
+    write.set_cpu_dirty(PixelRegion::for_pixel(x, y));
 }
 
 pub fn get_pixel(target: BitmapDataWrapper, x: u32, y: u32) -> u32 {
@@ -1493,7 +1493,7 @@ pub fn draw<'gc>(
 
     match &mut source {
         IBitmapDrawable::BitmapData(data) => {
-            data.render(smoothing, &mut render_context);
+            data.render(smoothing, &mut render_context, PixelSnapping::Never);
         }
         IBitmapDrawable::DisplayObject(object) => {
             // Note that we do *not* use `render_base`,

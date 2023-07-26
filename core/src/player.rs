@@ -40,6 +40,7 @@ use crate::limits::ExecutionLimit;
 use crate::loader::{LoadBehavior, LoadManager};
 use crate::locale::get_current_date_time;
 use crate::prelude::*;
+use crate::socket::Sockets;
 use crate::streams::StreamManager;
 use crate::string::{AvmString, AvmStringInterner};
 use crate::stub::StubCollection;
@@ -160,6 +161,8 @@ struct GcRootData<'gc> {
     /// List of actively playing streams to decode.
     stream_manager: StreamManager<'gc>,
 
+    sockets: Sockets<'gc>,
+
     /// Dynamic root for allowing handles to GC objects to exist outside of the GC.
     dynamic_root: DynamicRootSet<'gc>,
 }
@@ -187,6 +190,7 @@ impl<'gc> GcRootData<'gc> {
         &mut ExternalInterface<'gc>,
         &mut AudioManager<'gc>,
         &mut StreamManager<'gc>,
+        &mut Sockets<'gc>,
         DynamicRootSet<'gc>,
     ) {
         (
@@ -206,6 +210,7 @@ impl<'gc> GcRootData<'gc> {
             &mut self.external_interface,
             &mut self.audio_manager,
             &mut self.stream_manager,
+            &mut self.sockets,
             self.dynamic_root,
         )
     }
@@ -235,8 +240,6 @@ pub struct Player {
     player_version: u8,
 
     swf: Arc<SwfMovie>,
-
-    warn_on_unsupported_content: bool,
 
     is_playing: bool,
     needs_render: bool,
@@ -454,10 +457,6 @@ impl Player {
             stage.build_matrices(&mut activation.context);
         });
 
-        if self.swf.is_action_script_3() && self.warn_on_unsupported_content {
-            self.ui.display_unsupported_message();
-        }
-
         self.audio.set_frame_rate(self.frame_rate);
     }
 
@@ -551,6 +550,7 @@ impl Player {
                     * 1000.0
             });
 
+            self.update_sockets();
             self.update_timers(dt);
             self.update(|context| {
                 StreamManager::tick(context, dt);
@@ -1835,6 +1835,7 @@ impl Player {
                 external_interface,
                 audio_manager,
                 stream_manager,
+                sockets,
                 dynamic_root,
             ) = root_data.update_context_params();
 
@@ -1885,6 +1886,7 @@ impl Player {
                 frame_phase: &mut self.frame_phase,
                 stub_tracker: &mut self.stub_tracker,
                 stream_manager,
+                sockets,
                 dynamic_root,
             };
 
@@ -2015,6 +2017,13 @@ impl Player {
             self.mutate_with_update_context(|context| Timers::update_timers(context, dt));
     }
 
+    /// Update connected Sockets.
+    pub fn update_sockets(&mut self) {
+        self.mutate_with_update_context(|context| {
+            Sockets::update_sockets(context);
+        })
+    }
+
     /// Returns whether this player consumes mouse wheel events.
     /// Used by web to prevent scrolling.
     pub fn should_prevent_scrolling(&mut self) -> bool {
@@ -2093,7 +2102,6 @@ pub struct PlayerBuilder {
     viewport_width: u32,
     viewport_height: u32,
     viewport_scale_factor: f64,
-    warn_on_unsupported_content: bool,
     load_behavior: LoadBehavior,
     spoofed_url: Option<String>,
     compatibility_rules: CompatibilityRules,
@@ -2138,7 +2146,6 @@ impl PlayerBuilder {
             viewport_width: 550,
             viewport_height: 400,
             viewport_scale_factor: 1.0,
-            warn_on_unsupported_content: true,
             load_behavior: LoadBehavior::Streaming,
             spoofed_url: None,
             compatibility_rules: CompatibilityRules::default(),
@@ -2232,13 +2239,6 @@ impl PlayerBuilder {
     #[inline]
     pub fn with_max_execution_duration(mut self, duration: Duration) -> Self {
         self.max_execution_duration = duration;
-        self
-    }
-
-    /// Configures the player to warn if unsupported content is detected (ActionScript 3.0).
-    #[inline]
-    pub fn with_warn_on_unsupported_content(mut self, value: bool) -> Self {
-        self.warn_on_unsupported_content = value;
         self
     }
 
@@ -2356,6 +2356,7 @@ impl PlayerBuilder {
                     timers: Timers::new(),
                     unbound_text_fields: Vec::new(),
                     stream_manager: StreamManager::new(),
+                    sockets: Sockets::empty(),
                     dynamic_root,
                 },
             ),
@@ -2440,7 +2441,6 @@ impl PlayerBuilder {
                 player_version,
                 is_playing: self.autoplay,
                 needs_render: true,
-                warn_on_unsupported_content: self.warn_on_unsupported_content,
                 self_reference: self_ref.clone(),
                 load_behavior: self.load_behavior,
                 spoofed_url: self.spoofed_url.clone(),

@@ -114,6 +114,7 @@ pub struct SystemClasses<'gc> {
     pub ioerror: ClassObject<'gc>,
     pub eoferror: ClassObject<'gc>,
     pub urierror: ClassObject<'gc>,
+    pub securityerror: ClassObject<'gc>,
     pub error: ClassObject<'gc>,
     pub uncaughterrorevents: ClassObject<'gc>,
     pub statictext: ClassObject<'gc>,
@@ -143,6 +144,7 @@ pub struct SystemClasses<'gc> {
     pub shaderparameter: ClassObject<'gc>,
     pub netstatusevent: ClassObject<'gc>,
     pub shaderfilter: ClassObject<'gc>,
+    pub statusevent: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -232,6 +234,7 @@ impl<'gc> SystemClasses<'gc> {
             ioerror: object,
             eoferror: object,
             urierror: object,
+            securityerror: object,
             error: object,
             uncaughterrorevents: object,
             statictext: object,
@@ -261,6 +264,7 @@ impl<'gc> SystemClasses<'gc> {
             shaderparameter: object,
             netstatusevent: object,
             shaderfilter: object,
+            statusevent: object,
         }
     }
 }
@@ -651,6 +655,7 @@ fn load_playerglobal<'gc>(
             ("", "RangeError", rangeerror),
             ("", "RegExp", regexp),
             ("", "ReferenceError", referenceerror),
+            ("", "SecurityError", securityerror),
             ("", "SyntaxError", syntaxerror),
             ("", "TypeError", typeerror),
             ("", "URIError", urierror),
@@ -720,6 +725,7 @@ fn load_playerglobal<'gc>(
             ("flash.events", "FullScreenEvent", fullscreenevent),
             ("flash.events", "UncaughtErrorEvents", uncaughterrorevents),
             ("flash.events", "NetStatusEvent", netstatusevent),
+            ("flash.events", "StatusEvent", statusevent),
             ("flash.geom", "Matrix", matrix),
             ("flash.geom", "Point", point),
             ("flash.geom", "Rectangle", rectangle),

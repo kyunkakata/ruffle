@@ -11,6 +11,11 @@ proxy = Proxy
 upgrade-http = Upgrade HTTP to HTTPS
 upgrade-http-check = Upgrade
 
+socket-mode = Socket Mode
+socket-mode-unrestricted = Unrestricted
+socket-mode-ask = Ask
+socket-mode-deny = Deny
+
 open-url-mode = Open URL Mode
 open-url-mode-allow = Allow
 open-url-mode-confirm = Confirm
@@ -57,9 +62,6 @@ scale-mode-noborder = No Border
 scale-mode-noscale = No Scale
 scale-mode-showall = Show All
 scale-mode-force = Force
-
-warn-if-unsupported = Warn if Unsupported
-warn-if-unsupported-check = Warn
 
 player-version = Player Version
 

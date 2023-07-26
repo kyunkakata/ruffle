@@ -179,6 +179,17 @@ pub fn argument_error<'gc>(
 
 #[inline(never)]
 #[cold]
+pub fn security_error<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    message: &str,
+    code: u32,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let class = activation.avm2().classes().securityerror;
+    error_constructor(activation, class, message, code)
+}
+
+#[inline(never)]
+#[cold]
 pub fn type_error<'gc>(
     activation: &mut Activation<'_, 'gc>,
     message: &str,
@@ -207,6 +218,17 @@ pub fn verify_error<'gc>(
     code: u32,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let class = activation.avm2().classes().verifyerror;
+    error_constructor(activation, class, message, code)
+}
+
+#[inline(never)]
+#[cold]
+pub fn illegal_operation_error<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    message: &str,
+    code: u32,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let class = activation.avm2().classes().illegaloperationerror;
     error_constructor(activation, class, message, code)
 }
 

@@ -1,6 +1,7 @@
 //! Browser-related platform functions
 
 use crate::loader::Error;
+use crate::socket::{ConnectionState, SocketAction, SocketHandle};
 use crate::string::WStr;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,8 @@ use std::fmt::Display;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 use swf::avm1::types::SendVarsMethod;
 use url::{ParseError, Url};
 
@@ -20,6 +23,19 @@ pub enum NavigationMethod {
 
     /// Indicates that navigation should generate a POST request.
     Post,
+}
+
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SocketMode {
+    /// Allows movies to connect to any host using sockets.
+    Unrestricted,
+
+    /// Refuse all socket connection requests
+    Deny,
+
+    /// Ask the user every time a socket connection is requested
+    Ask,
 }
 
 /// The handling mode of links opening a new website.
@@ -238,6 +254,25 @@ pub trait NavigatorBackend {
     /// Changing http -> https for example. This function may alter any part of the
     /// URL (generally only if configured to do so by the user).
     fn pre_process_url(&self, url: Url) -> Url;
+
+    /// Handle any Socket connection request
+    ///
+    /// Use [SocketAction::Connect] to notify AVM that the connection failed or succeeded.
+    ///
+    /// Use [SocketAction::Close] to close the connection on AVM side.
+    ///
+    /// Use [SocketAction::Data] to send data to AVM side.
+    ///
+    /// When the Sender of the Receiver is dropped then this task should end.
+    fn connect_socket(
+        &mut self,
+        host: String,
+        port: u16,
+        timeout: Duration,
+        handle: SocketHandle,
+        receiver: Receiver<Vec<u8>>,
+        sender: Sender<SocketAction>,
+    );
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -366,6 +401,20 @@ impl NavigatorBackend for NullNavigatorBackend {
 
     fn pre_process_url(&self, url: Url) -> Url {
         url
+    }
+
+    fn connect_socket(
+        &mut self,
+        _host: String,
+        _port: u16,
+        _timeout: Duration,
+        handle: SocketHandle,
+        _receiver: Receiver<Vec<u8>>,
+        sender: Sender<SocketAction>,
+    ) {
+        sender
+            .send(SocketAction::Connect(handle, ConnectionState::Failed))
+            .expect("working channel send");
     }
 }
 

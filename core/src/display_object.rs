@@ -49,7 +49,7 @@ pub use loader_display::LoaderDisplay;
 pub use morph_shape::{MorphShape, MorphShapeStatic};
 pub use movie_clip::{MovieClip, MovieClipWeak, Scene};
 use ruffle_render::backend::{BitmapCacheEntry, RenderBackend};
-use ruffle_render::bitmap::{BitmapHandle, BitmapInfo};
+use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList};
 use ruffle_render::filters::Filter;
 pub use stage::{Stage, StageAlign, StageDisplayState, StageScaleMode, WindowMode};
@@ -147,7 +147,7 @@ impl BitmapCache {
         }
         let acceptable_size = if swf_version > 9 {
             let total = actual_width as u32 * actual_height as u32;
-            actual_width < 8191 && actual_height < 8191 && total < 1677215
+            actual_width < 8191 && actual_height < 8191 && total < 16777215
         } else {
             actual_width < 2880 && actual_height < 2880
         };
@@ -156,7 +156,6 @@ impl BitmapCache {
             && actual_height > 0
             && acceptable_size
         {
-            tracing::info!("{} x {}", actual_width, actual_height);
             let handle = renderer.create_empty_texture(actual_width as u32, actual_height as u32);
             self.bitmap = handle.ok().map(|handle| BitmapInfo {
                 width: actual_width,
@@ -188,7 +187,7 @@ pub struct DisplayObjectBase<'gc> {
     depth: Depth,
     #[collect(require_static)]
     transform: Transform,
-    name: AvmString<'gc>,
+    name: Option<AvmString<'gc>>,
     #[collect(require_static)]
     filters: Vec<Filter>,
     clip_depth: Depth,
@@ -258,7 +257,7 @@ impl<'gc> Default for DisplayObjectBase<'gc> {
             place_frame: Default::default(),
             depth: Default::default(),
             transform: Default::default(),
-            name: Default::default(),
+            name: None,
             filters: Default::default(),
             clip_depth: Default::default(),
             rotation: Degrees::from_radians(0.0),
@@ -480,12 +479,12 @@ impl<'gc> DisplayObjectBase<'gc> {
         changed
     }
 
-    fn name(&self) -> AvmString<'gc> {
+    fn name(&self) -> Option<AvmString<'gc>> {
         self.name
     }
 
     fn set_name(&mut self, name: AvmString<'gc>) {
-        self.name = name;
+        self.name = Some(name);
     }
 
     fn filters(&self) -> Vec<Filter> {
@@ -879,6 +878,7 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
                 color_transform: cache_info.base_transform.color_transform,
             },
             true,
+            PixelSnapping::Always, // cacheAsBitmap forces pixel snapping
         );
     } else {
         if let Some(background) = this.opaque_background() {
@@ -1381,7 +1381,7 @@ pub trait TDisplayObject<'gc>:
     }
 
     fn name(&self) -> AvmString<'gc> {
-        self.base().name()
+        self.base().name().unwrap_or_default()
     }
     fn set_name(&self, gc_context: MutationContext<'gc, '_>, name: AvmString<'gc>) {
         self.base_mut(gc_context).set_name(name)
@@ -2180,7 +2180,7 @@ pub trait TDisplayObject<'gc>:
 
     /// Assigns a default instance name `instanceN` to this object.
     fn set_default_instance_name(&self, context: &mut UpdateContext<'_, 'gc>) {
-        if self.name().is_empty() {
+        if self.base().name().is_none() {
             let name = format!("instance{}", *context.instance_counter);
             self.set_name(
                 context.gc_context,

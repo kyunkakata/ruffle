@@ -338,10 +338,15 @@ export interface BaseLoadOptions {
     favorFlash?: boolean;
 
     /**
-     * Whether or not to display an overlay with a warning when
-     * loading a movie with unsupported content.
+     * This is no longer used and does not affect anything.
+     * It is only kept for backwards compatibility.
+     *
+     * Previously:
+     * "Whether or not to display an overlay with a warning when
+     * loading a movie with unsupported content."
      *
      * @default true
+     * @deprecated
      */
     warnOnUnsupportedContent?: boolean;
 

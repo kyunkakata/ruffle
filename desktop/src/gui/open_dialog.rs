@@ -5,7 +5,7 @@ use crate::util::pick_file;
 use egui::{
     Align2, Button, Checkbox, ComboBox, DragValue, Grid, Slider, TextEdit, Ui, Widget, Window,
 };
-use ruffle_core::backend::navigator::OpenURLMode;
+use ruffle_core::backend::navigator::{OpenURLMode, SocketMode};
 use ruffle_core::config::Letterbox;
 use ruffle_core::{LoadBehavior, StageAlign, StageScaleMode};
 use ruffle_render::quality::StageQuality;
@@ -153,6 +153,32 @@ impl OpenDialog {
                     &mut self.options.upgrade_to_https,
                     text(&self.locale, "upgrade-http-check"),
                 );
+                ui.end_row();
+
+                ui.label(text(&self.locale, "socket-mode"));
+                ComboBox::from_id_source("open-file-advanced-options-socket-mode")
+                    .selected_text(match self.options.socket_mode {
+                        SocketMode::Unrestricted => text(&self.locale, "socket-mode-unrestricted"),
+                        SocketMode::Ask => text(&self.locale, "socket-mode-ask"),
+                        SocketMode::Deny => text(&self.locale, "socket-mode-deny"),
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.options.socket_mode,
+                            SocketMode::Unrestricted,
+                            text(&self.locale, "socket-mode-unrestricted"),
+                        );
+                        ui.selectable_value(
+                            &mut self.options.socket_mode,
+                            SocketMode::Ask,
+                            text(&self.locale, "socket-mode-ask"),
+                        );
+                        ui.selectable_value(
+                            &mut self.options.socket_mode,
+                            SocketMode::Deny,
+                            text(&self.locale, "socket-mode-deny"),
+                        );
+                    });
                 ui.end_row();
 
                 // TODO: This should probably be a global setting somewhere, not per load
@@ -427,14 +453,6 @@ impl OpenDialog {
                 ui.checkbox(
                     &mut self.options.dummy_external_interface,
                     text(&self.locale, "dummy-external-interface-check"),
-                );
-                ui.end_row();
-
-                // TODO: This should probably be a global setting somewhere, not per load
-                ui.label(text(&self.locale, "warn-if-unsupported"));
-                ui.checkbox(
-                    &mut self.options.warn_on_unsupported_content,
-                    text(&self.locale, "warn-if-unsupported-check"),
                 );
                 ui.end_row();
 

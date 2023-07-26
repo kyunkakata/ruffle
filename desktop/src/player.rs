@@ -9,13 +9,14 @@ use crate::gui::MovieView;
 use crate::{CALLSTACK, RENDER_INFO, SWF_INFO};
 use anyhow::anyhow;
 use ruffle_core::backend::audio::AudioBackend;
-use ruffle_core::backend::navigator::OpenURLMode;
+use ruffle_core::backend::navigator::{OpenURLMode, SocketMode};
 use ruffle_core::config::Letterbox;
 use ruffle_core::{LoadBehavior, Player, PlayerBuilder, PlayerEvent, StageAlign, StageScaleMode};
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::backend::WgpuRenderBackend;
 use ruffle_render_wgpu::descriptors::Descriptors;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -37,9 +38,10 @@ pub struct PlayerOptions {
     pub volume: f32,
     pub force_scale: bool,
     pub proxy: Option<Url>,
+    pub socket_allowed: HashSet<String>,
+    pub socket_mode: SocketMode,
     pub upgrade_to_https: bool,
     pub fullscreen: bool,
-    pub warn_on_unsupported_content: bool,
     pub load_behavior: LoadBehavior,
     pub letterbox: Letterbox,
     pub spoof_url: Option<Url>,
@@ -64,7 +66,6 @@ impl From<&Opt> for PlayerOptions {
             proxy: value.proxy.clone(),
             upgrade_to_https: value.upgrade_to_https,
             fullscreen: value.fullscreen,
-            warn_on_unsupported_content: !value.dont_warn_on_unsupported_content,
             load_behavior: value.load_behavior,
             letterbox: value.letterbox,
             spoof_url: value.spoof_url.clone(),
@@ -72,6 +73,8 @@ impl From<&Opt> for PlayerOptions {
             frame_rate: value.frame_rate,
             open_url_mode: value.open_url_mode,
             dummy_external_interface: value.dummy_external_interface,
+            socket_allowed: HashSet::from_iter(value.socket_allow.iter().cloned()),
+            socket_mode: value.socket_mode,
         }
     }
 }
@@ -112,6 +115,8 @@ impl ActivePlayer {
             opt.proxy.clone(),
             opt.upgrade_to_https,
             opt.open_url_mode,
+            opt.socket_allowed.clone(),
+            opt.socket_mode,
         );
 
         if cfg!(feature = "software_video") {
@@ -139,15 +144,11 @@ impl ActivePlayer {
             .with_navigator(navigator)
             .with_renderer(renderer)
             .with_storage(DiskStorageBackend::new().expect("Couldn't create storage backend"))
-            .with_ui(
-                DesktopUiBackend::new(event_loop.clone(), window.clone())
-                    .expect("Couldn't create ui backend"),
-            )
+            .with_ui(DesktopUiBackend::new(window.clone()).expect("Couldn't create ui backend"))
             .with_autoplay(true)
             .with_letterbox(opt.letterbox)
             .with_max_execution_duration(max_execution_duration)
             .with_quality(opt.quality)
-            .with_warn_on_unsupported_content(opt.warn_on_unsupported_content)
             .with_align(opt.align, opt.force_align)
             .with_scale_mode(opt.scale, opt.force_scale)
             .with_fullscreen(opt.fullscreen)

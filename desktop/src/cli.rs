@@ -1,7 +1,7 @@
 use crate::RUFFLE_VERSION;
 use anyhow::Error;
 use clap::Parser;
-use ruffle_core::backend::navigator::OpenURLMode;
+use ruffle_core::backend::navigator::{OpenURLMode, SocketMode};
 use ruffle_core::config::Letterbox;
 use ruffle_core::{LoadBehavior, StageAlign, StageScaleMode};
 use ruffle_render::quality::StageQuality;
@@ -85,6 +85,14 @@ pub struct Opt {
     #[clap(long)]
     pub proxy: Option<Url>,
 
+    /// Add an endpoint (`[host]:[port]`) to the socket whitelist.
+    #[clap(long = "socket-allow", number_of_values = 1, action = clap::ArgAction::Append)]
+    pub socket_allow: Vec<String>,
+
+    /// Define how to deal with sockets.
+    #[clap(long = "socket-mode", default_value = "ask")]
+    pub socket_mode: SocketMode,
+
     /// Replace all embedded HTTP URLs with HTTPS.
     #[clap(long, action)]
     pub upgrade_to_https: bool,
@@ -95,10 +103,6 @@ pub struct Opt {
 
     #[clap(long, action)]
     pub timedemo: bool,
-
-    /// Start application without ActionScript 3 warning.
-    #[clap(long, action)]
-    pub dont_warn_on_unsupported_content: bool,
 
     #[clap(long, default_value = "streaming")]
     pub load_behavior: LoadBehavior,
