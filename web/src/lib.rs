@@ -670,9 +670,9 @@ impl Ruffle {
                     let _ = instance.with_core_mut(|core| {
                         core.handle_event(event);
                     });
-                    if instance.has_focus {
-                        js_event.prevent_default();
-                    }
+                    // if instance.has_focus {
+                    js_event.prevent_default();
+                    // }
                 });
             });
 
@@ -783,7 +783,7 @@ impl Ruffle {
             // Create player mouse down handler.
             let player_mouse_down_callback = Closure::new(move |_js_event| {
                 let _ = ruffle.with_instance_mut(|instance| {
-                    instance.has_focus = true;
+                    // instance.has_focus = true;
                     // Ensure the parent window gets focus. This is necessary for events
                     // to be received when the player is inside a frame.
                     instance.window.focus().warn_on_error();
@@ -800,11 +800,11 @@ impl Ruffle {
 
             // Create window mouse down handler.
             let window_mouse_down_callback = Closure::new(move |_js_event| {
-                let _ = ruffle.with_instance_mut(|instance| {
-                    // If we actually clicked on the player, this will be reset to true
-                    // after the event bubbles down to the player.
-                    instance.has_focus = false;
-                });
+                // let _ = ruffle.with_instance_mut(|instance| {
+                //     // If we actually clicked on the player, this will be reset to true
+                //     // after the event bubbles down to the player.
+                //     instance.has_focus = false;
+                // });
             });
 
             window
@@ -838,9 +838,9 @@ impl Ruffle {
                         core.handle_event(event);
                     });
 
-                    if instance.has_focus {
-                        js_event.prevent_default();
-                    }
+                    // if instance.has_focus {
+                    js_event.prevent_default();
+                    // }
                 });
             });
 
@@ -881,37 +881,35 @@ impl Ruffle {
             // Create keydown event handler.
             let key_down_callback = Closure::new(move |js_event: KeyboardEvent| {
                 let _ = ruffle.with_instance(|instance| {
-                    if instance.has_focus {
-                        let mut paste_event = false;
-                        let _ = instance.with_core_mut(|core| {
-                            let key_code = web_to_ruffle_key_code(&js_event.code());
-                            let key_char = web_key_to_codepoint(&js_event.key());
-                            let is_ctrl_cmd = js_event.ctrl_key() || js_event.meta_key();
-                            core.handle_event(PlayerEvent::KeyDown { key_code, key_char });
+                    // if instance.has_focus {
+                    let mut paste_event = false;
+                    let _ = instance.with_core_mut(|core| {
+                        let key_code = web_to_ruffle_key_code(&js_event.code());
+                        let key_char = web_key_to_codepoint(&js_event.key());
+                        let is_ctrl_cmd = js_event.ctrl_key() || js_event.meta_key();
+                        core.handle_event(PlayerEvent::KeyDown { key_code, key_char });
 
-                            if let Some(control_code) = web_to_ruffle_text_control(
-                                &js_event.key(),
-                                is_ctrl_cmd,
-                                js_event.shift_key(),
-                            ) {
-                                paste_event = control_code == TextControlCode::Paste;
-                                // The JS paste event fires separately and the clipboard text is not available until then,
-                                // so we need to wait before handling it
-                                if !paste_event {
-                                    core.handle_event(PlayerEvent::TextControl {
-                                        code: control_code,
-                                    });
-                                }
-                            } else if let Some(codepoint) = key_char {
-                                core.handle_event(PlayerEvent::TextInput { codepoint });
+                        if let Some(control_code) = web_to_ruffle_text_control(
+                            &js_event.key(),
+                            is_ctrl_cmd,
+                            js_event.shift_key(),
+                        ) {
+                            paste_event = control_code == TextControlCode::Paste;
+                            // The JS paste event fires separately and the clipboard text is not available until then,
+                            // so we need to wait before handling it
+                            if !paste_event {
+                                core.handle_event(PlayerEvent::TextControl { code: control_code });
                             }
-                        });
-
-                        // Don't prevent the JS paste event from firing
-                        if !paste_event {
-                            js_event.prevent_default();
+                        } else if let Some(codepoint) = key_char {
+                            core.handle_event(PlayerEvent::TextInput { codepoint });
                         }
+                    });
+
+                    // Don't prevent the JS paste event from firing
+                    if !paste_event {
+                        js_event.prevent_default();
                     }
+                    // }
                 });
             });
 
@@ -925,21 +923,20 @@ impl Ruffle {
 
             let paste_callback = Closure::new(move |js_event: ClipboardEvent| {
                 let _ = ruffle.with_instance(|instance| {
-                    if instance.has_focus {
-                        let _ = instance.with_core_mut(|core| {
-                            let clipboard_content = if let Some(content) = js_event.clipboard_data()
-                            {
-                                content.get_data("text/plain").unwrap_or_default()
-                            } else {
-                                "".into()
-                            };
-                            core.ui_mut().set_clipboard_content(clipboard_content);
-                            core.handle_event(PlayerEvent::TextControl {
-                                code: TextControlCode::Paste,
-                            });
+                    // if instance.has_focus {
+                    let _ = instance.with_core_mut(|core| {
+                        let clipboard_content = if let Some(content) = js_event.clipboard_data() {
+                            content.get_data("text/plain").unwrap_or_default()
+                        } else {
+                            "".into()
+                        };
+                        core.ui_mut().set_clipboard_content(clipboard_content);
+                        core.handle_event(PlayerEvent::TextControl {
+                            code: TextControlCode::Paste,
                         });
-                        js_event.prevent_default();
-                    }
+                    });
+                    js_event.prevent_default();
+                    // }
                 });
             });
 
@@ -951,14 +948,14 @@ impl Ruffle {
             // Create keyup event handler.
             let key_up_callback = Closure::new(move |js_event: KeyboardEvent| {
                 let _ = ruffle.with_instance(|instance| {
-                    if instance.has_focus {
-                        let _ = instance.with_core_mut(|core| {
-                            let key_code = web_to_ruffle_key_code(&js_event.code());
-                            let key_char = web_key_to_codepoint(&js_event.key());
-                            core.handle_event(PlayerEvent::KeyUp { key_code, key_char });
-                        });
-                        js_event.prevent_default();
-                    }
+                    // if instance.has_focus {
+                    let _ = instance.with_core_mut(|core| {
+                        let key_code = web_to_ruffle_key_code(&js_event.code());
+                        let key_char = web_key_to_codepoint(&js_event.key());
+                        core.handle_event(PlayerEvent::KeyUp { key_code, key_char });
+                    });
+                    js_event.prevent_default();
+                    // }
                 });
             });
 
