@@ -8,7 +8,6 @@ use crate::avm2::script::TranslationUnit;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
-use crate::avm2::QName;
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::string::{AvmAtom, AvmString, WStr};
 use gc_arena::{Collect, GcCell, MutationContext};
@@ -1015,6 +1014,12 @@ impl<'gc> Value<'gc> {
         }
 
         if matches!(self, Value::Undefined) || matches!(self, Value::Null) {
+            if GcCell::ptr_eq(
+                class,
+                activation.avm2().classes().void.inner_class_definition(),
+            ) {
+                return Ok(Value::Undefined);
+            }
             return Ok(Value::Null);
         }
 
@@ -1028,24 +1033,6 @@ impl<'gc> Value<'gc> {
         if let Ok(object) = self.coerce_to_object(activation) {
             if object.is_of_type(class, &mut activation.context) {
                 return Ok(*self);
-            }
-
-            if let Some(vector) = object.as_vector_storage() {
-                let name = class.read().name();
-                let vector_public_namespace = activation.avm2().vector_public_namespace;
-                let vector_internal_namespace = activation.avm2().vector_internal_namespace;
-                if name == QName::new(vector_public_namespace, "Vector")
-                    || (name == QName::new(vector_internal_namespace, "Vector$int")
-                        && vector.value_type() == activation.avm2().classes().int)
-                    || (name == QName::new(vector_internal_namespace, "Vector$uint")
-                        && vector.value_type() == activation.avm2().classes().uint)
-                    || (name == QName::new(vector_internal_namespace, "Vector$number")
-                        && vector.value_type() == activation.avm2().classes().number)
-                    || (name == QName::new(vector_internal_namespace, "Vector$object")
-                        && vector.value_type() == activation.avm2().classes().object)
-                {
-                    return Ok(*self);
-                }
             }
         }
 
@@ -1137,6 +1124,15 @@ impl<'gc> Value<'gc> {
             activation.avm2().classes().int.inner_class_definition(),
         ) {
             return self.is_i32();
+        }
+
+        if let Value::Undefined = self {
+            if GcCell::ptr_eq(
+                type_object,
+                activation.avm2().classes().void.inner_class_definition(),
+            ) {
+                return true;
+            }
         }
 
         if let Ok(o) = self.coerce_to_object(activation) {

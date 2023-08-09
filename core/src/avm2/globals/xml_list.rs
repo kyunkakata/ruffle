@@ -39,6 +39,9 @@ pub fn init<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_xml_list_object().unwrap();
     let value = args[0];
+    let ignore_comments = args.get_bool(1);
+    let ignore_processing_instructions = args.get_bool(2);
+    let ignore_whitespace = args.get_bool(3);
 
     if let Some(obj) = value.as_object() {
         if let Some(xml) = obj.as_xml_object() {
@@ -51,7 +54,13 @@ pub fn init<'gc>(
         }
     }
 
-    match E4XNode::parse(value, activation) {
+    match E4XNode::parse(
+        value,
+        activation,
+        ignore_comments,
+        ignore_processing_instructions,
+        ignore_whitespace,
+    ) {
         Ok(nodes) => {
             this.set_children(
                 activation.context.gc_context,
@@ -270,13 +279,12 @@ pub fn descendants<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let xml_list = this.as_xml_list_object().unwrap();
     let multiname = name_to_multiname(activation, &args[0], false)?;
-    let mut descendants = Vec::new();
-    for child in xml_list.children().iter() {
-        child.node().descendants(&multiname, &mut descendants);
+    if let Some(descendants) = this.xml_descendants(activation, &multiname) {
+        Ok(descendants.into())
+    } else {
+        Ok(Value::Undefined)
     }
-    Ok(XmlListObject::new(activation, descendants, Some(xml_list.into())).into())
 }
 
 pub fn text<'gc>(

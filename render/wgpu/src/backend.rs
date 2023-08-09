@@ -111,6 +111,21 @@ impl WgpuRenderBackend<SwapChainTarget> {
         let target = SwapChainTarget::new(surface, &descriptors.adapter, size, &descriptors.device);
         Self::new(Arc::new(descriptors), target)
     }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn recreate_surface<
+        W: raw_window_handle::HasRawWindowHandle + raw_window_handle::HasRawDisplayHandle,
+    >(
+        &mut self,
+        window: &W,
+        size: (u32, u32),
+    ) -> Result<(), Error> {
+        let descriptors = &self.descriptors;
+        let surface = unsafe { descriptors.wgpu_instance.create_surface(window) }?;
+        self.target =
+            SwapChainTarget::new(surface, &descriptors.adapter, size, &descriptors.device);
+        Ok(())
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -975,6 +990,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     store: true,
                 },
             }),
+            1,
             // When running a standalone shader, we always process the entire image
             &FilterSource::for_entire_texture(&target.texture),
         )?;

@@ -286,6 +286,9 @@ impl<'gc> E4XNode<'gc> {
     pub fn parse(
         mut value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
+        ignore_comments: bool,
+        ignore_processing_instructions: bool,
+        ignore_white: bool,
     ) -> Result<Vec<Self>, Error<'gc>> {
         let string = match &value {
             // The docs claim that this throws a TypeError, but it actually doesn't
@@ -304,11 +307,6 @@ impl<'gc> E4XNode<'gc> {
         let data_utf8 = string.to_utf8_lossy();
         let mut parser = Reader::from_str(&data_utf8);
         let mut open_tags: Vec<E4XNode<'gc>> = vec![];
-
-        // FIXME - look these up from static property and settings
-        let ignore_comments = true;
-        let ignore_processing_instructions = true;
-        let ignore_white = true;
 
         let mut top_level = vec![];
 
@@ -713,10 +711,18 @@ fn to_xml_string_inner<'gc>(xml: E4XOrXml<'gc>, buf: &mut WString) -> Result<(),
             buf.push_str(&escape_element_value(*text));
             return Ok(());
         }
-        E4XNodeKind::Attribute(_)
-        | E4XNodeKind::Comment(_)
-        | E4XNodeKind::ProcessingInstruction(_) => {
+        E4XNodeKind::ProcessingInstruction(_) => {
             return Err(format!("ToXMLString: Not yet implemented node {:?}", node_kind).into())
+        }
+        E4XNodeKind::Comment(data) => {
+            buf.push_utf8("<!--");
+            buf.push_str(data);
+            buf.push_utf8("-->");
+            return Ok(());
+        }
+        E4XNodeKind::Attribute(data) => {
+            buf.push_str(&escape_attribute_value(*data));
+            return Ok(());
         }
         E4XNodeKind::CData(data) => {
             buf.push_utf8("<![CDATA[");

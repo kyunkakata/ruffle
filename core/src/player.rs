@@ -30,8 +30,8 @@ use crate::display_object::{
     TInteractiveObject, WindowMode,
 };
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent};
-use crate::external::Value as ExternalValue;
-use crate::external::{ExternalInterface, ExternalInterfaceProvider};
+use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsCommandProvider};
+use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::FocusTracker;
 use crate::font::Font;
 use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
@@ -632,11 +632,9 @@ impl Player {
                 } else {
                     None
                 };
-                crate::avm1::make_context_menu_state(menu_object, &mut activation)
-            } else if let Some(Avm2Value::Object(_obj)) = root_dobj.map(|root| root.object2()) {
-                // TODO: send "menuSelect" event
-                tracing::warn!("AVM2 Context menu callbacks are not implemented");
 
+                crate::avm1::make_context_menu_state(menu_object, &mut activation)
+            } else if let Some(Avm2Value::Object(hit_obj)) = root_dobj.map(|root| root.object2()) {
                 let mut activation = Avm2Activation::from_nothing(context.reborrow());
 
                 let menu_object = root_dobj
@@ -644,6 +642,27 @@ impl Player {
                     .as_interactive()
                     .map(|iobj| iobj.context_menu())
                     .and_then(|v| v.as_object());
+
+                if let Some(menu_object) = menu_object {
+                    // TODO: contextMenuOwner and mouseTarget might not be the same
+                    let menu_evt = activation
+                        .avm2()
+                        .classes()
+                        .contextmenuevent
+                        .construct(
+                            &mut activation,
+                            &[
+                                "menuSelect".into(),
+                                false.into(),
+                                false.into(),
+                                hit_obj.into(),
+                                hit_obj.into(),
+                            ],
+                        )
+                        .expect("Context menu event should be constructed!");
+
+                    Avm2::dispatch_event(&mut activation.context, menu_evt, menu_object);
+                }
 
                 crate::avm2::make_context_menu_state(menu_object, &mut activation)
             } else {
@@ -679,8 +698,40 @@ impl Player {
                     ContextMenuCallback::Forward => Self::forward_root_movie(context),
                     ContextMenuCallback::Back => Self::back_root_movie(context),
                     ContextMenuCallback::Rewind => Self::rewind_root_movie(context),
-                    ContextMenuCallback::Avm2 { .. } => {
-                        // TODO: Send menuItemSelect event
+                    ContextMenuCallback::Avm2 { item } => {
+                        // TODO: This should use the pointed display object (see comment on line 614)
+                        let root_dobj = context.stage.root_clip();
+
+                        if let Some(root_dobj) = root_dobj {
+                            let menu_item = *item;
+                            let mut activation = Avm2Activation::from_nothing(context.reborrow());
+
+                            let menu_obj = root_dobj
+                                .as_interactive()
+                                .map(|iobj| iobj.context_menu())
+                                .and_then(|v| v.as_object());
+
+                            if menu_obj.is_some() {
+                                // TODO: contextMenuOwner and mouseTarget might not be the same (see above comment)
+                                let menu_evt = activation
+                                    .avm2()
+                                    .classes()
+                                    .contextmenuevent
+                                    .construct(
+                                        &mut activation,
+                                        &[
+                                            "menuItemSelect".into(),
+                                            false.into(),
+                                            false.into(),
+                                            root_dobj.object2(),
+                                            root_dobj.object2(),
+                                        ],
+                                    )
+                                    .expect("Context menu event should be constructed!");
+
+                                Avm2::dispatch_event(context, menu_evt, menu_item);
+                            }
+                        }
                     }
                     ContextMenuCallback::QualityLow => {
                         context.stage.set_quality(context, StageQuality::Low)
@@ -2110,6 +2161,7 @@ pub struct PlayerBuilder {
     sandbox_type: SandboxType,
     frame_rate: Option<f64>,
     external_interface_providers: Vec<Box<dyn ExternalInterfaceProvider>>,
+    fs_command_provider: Box<dyn FsCommandProvider>,
 }
 
 impl PlayerBuilder {
@@ -2154,6 +2206,7 @@ impl PlayerBuilder {
             sandbox_type: SandboxType::LocalTrusted,
             frame_rate: None,
             external_interface_providers: vec![],
+            fs_command_provider: Box::new(NullFsCommandProvider),
         }
     }
 
@@ -2318,12 +2371,19 @@ impl PlayerBuilder {
         self
     }
 
+    /// Adds an FSCommand implementation for movies to communicate with
+    pub fn with_fs_commands(mut self, provider: Box<dyn FsCommandProvider>) -> Self {
+        self.fs_command_provider = provider;
+        self
+    }
+
     fn create_gc_root<'gc>(
         gc_context: &'gc gc_arena::Mutation<'gc>,
         player_version: u8,
         fullscreen: bool,
         fake_movie: Arc<SwfMovie>,
         external_interface_providers: Vec<Box<dyn ExternalInterfaceProvider>>,
+        fs_command_provider: Box<dyn FsCommandProvider>,
     ) -> GcRoot<'gc> {
         let mut interner = AvmStringInterner::new();
         let mut init = GcContext {
@@ -2344,7 +2404,10 @@ impl PlayerBuilder {
                     interner,
                     current_context_menu: None,
                     drag_object: None,
-                    external_interface: ExternalInterface::new(external_interface_providers),
+                    external_interface: ExternalInterface::new(
+                        external_interface_providers,
+                        fs_command_provider,
+                    ),
                     focus_tracker: FocusTracker::new(gc_context),
                     library: Library::empty(),
                     load_manager: LoadManager::new(),
@@ -2459,6 +2522,7 @@ impl PlayerBuilder {
                             self.fullscreen,
                             fake_movie.clone(),
                             self.external_interface_providers,
+                            self.fs_command_provider,
                         )
                     },
                 ))),

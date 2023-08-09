@@ -1,4 +1,4 @@
-use crate::avm2::bytearray::{ByteArrayStorage, EofError};
+use crate::avm2::bytearray::{ByteArrayError, ByteArrayStorage};
 use crate::avm2::error::range_error;
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::{Activation, Error, Value as Avm2Value};
@@ -11,7 +11,7 @@ use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::TDisplayObject;
 use gc_arena::MutationContext;
 use ruffle_render::bitmap::{PixelRegion, PixelSnapping};
-use ruffle_render::commands::{CommandHandler, CommandList};
+use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::filters::Filter;
 use ruffle_render::matrix::Matrix;
 use ruffle_render::quality::StageQuality;
@@ -261,6 +261,11 @@ pub fn perlin_noise<'gc>(
 
     let turb = Turbulence::from_seed(random_seed);
 
+    let base_freq = (
+        if base.0 == 0.0 { 0.0 } else { 1.0 / base.0 },
+        if base.1 == 0.0 { 0.0 } else { 1.0 / base.1 },
+    );
+
     for y in 0..write.height() {
         for x in 0..write.width() {
             let px = x as f64;
@@ -273,7 +278,7 @@ pub fn perlin_noise<'gc>(
                 noise[0] = turb.turbulence(
                     0,
                     (px, py),
-                    (1.0 / base.0, 1.0 / base.1),
+                    base_freq,
                     num_octaves,
                     fractal_noise,
                     stitch,
@@ -289,7 +294,7 @@ pub fn perlin_noise<'gc>(
                     turb.turbulence(
                         1,
                         (px, py),
-                        (1.0 / base.0, 1.0 / base.1),
+                        base_freq,
                         num_octaves,
                         fractal_noise,
                         stitch,
@@ -318,7 +323,7 @@ pub fn perlin_noise<'gc>(
                         *noise_c = turb.turbulence(
                             channel,
                             (px, py),
-                            (1.0 / base.0, 1.0 / base.1),
+                            base_freq,
                             num_octaves,
                             fractal_noise,
                             stitch,
@@ -1518,7 +1523,10 @@ pub fn draw<'gc>(
         render_context.commands
     } else {
         let mut commands = CommandList::new();
-        commands.blend(render_context.commands, blend_mode);
+        commands.blend(
+            render_context.commands,
+            RenderBlendMode::Builtin(blend_mode),
+        );
         commands
     };
 
@@ -1616,6 +1624,7 @@ pub fn set_vector<'gc>(
 }
 
 pub fn get_pixels_as_byte_array<'gc>(
+    activation: &mut Activation<'_, 'gc>,
     target: BitmapDataWrapper,
     x: i32,
     y: i32,
@@ -1630,7 +1639,9 @@ pub fn get_pixels_as_byte_array<'gc>(
     for y in region.y_min..region.y_max {
         for x in region.x_min..region.x_max {
             let color = read.get_pixel32_raw(x, y);
-            result.write_unsigned_int(color.to_un_multiplied_alpha().into())?;
+            result
+                .write_unsigned_int(color.to_un_multiplied_alpha().into())
+                .map_err(|e| e.to_avm(activation))?;
         }
     }
 
@@ -1645,7 +1656,7 @@ pub fn set_pixels_from_byte_array<'gc>(
     width: i32,
     height: i32,
     bytearray: &mut ByteArrayStorage,
-) -> Result<(), EofError> {
+) -> Result<(), ByteArrayError> {
     let mut region = PixelRegion::for_region_i32(x, y, width, height);
     region.clamp(target.width(), target.height());
     let transparency = target.transparency();

@@ -59,6 +59,7 @@ pub struct Avm2ButtonData<'gc> {
     hit_area: Option<DisplayObject<'gc>>,
 
     /// The current tracking mode of this button.
+    #[collect(require_static)]
     tracking: ButtonTracking,
 
     /// The class of this button.
@@ -212,7 +213,7 @@ impl<'gc> Avm2Button<'gc> {
 
                         if swf_state != swf::ButtonState::HIT_TEST {
                             child.set_color_transform(context.gc_context, record.color_transform);
-                            child.set_blend_mode(context.gc_context, record.blend_mode);
+                            child.set_blend_mode(context.gc_context, record.blend_mode.into());
                             child.set_filters(
                                 context.gc_context,
                                 record.filters.iter().map(Filter::from).collect(),

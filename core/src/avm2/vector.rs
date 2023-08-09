@@ -29,21 +29,21 @@ pub struct VectorStorage<'gc> {
     is_fixed: bool,
 
     /// The allowed type of the contents of the vector, in the form of a class
-    /// object.
+    /// object. None represents a Vector.<*>.
     ///
     /// Vector typing is enforced by one of two ways: either by generating
     /// exceptions on values that are not of the given type, or by coercing
     /// incorrectly typed values to the given type if possible. Values that do
     /// not coerce are replaced with the default value for the given value
     /// type.
-    value_type: ClassObject<'gc>,
+    value_type: Option<ClassObject<'gc>>,
 }
 
 impl<'gc> VectorStorage<'gc> {
     pub fn new(
         length: usize,
         is_fixed: bool,
-        value_type: ClassObject<'gc>,
+        value_type: Option<ClassObject<'gc>>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Self {
         let storage = Vec::new();
@@ -61,7 +61,7 @@ impl<'gc> VectorStorage<'gc> {
         self_vec
     }
 
-    fn check_fixed(&self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
+    pub fn check_fixed(&self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         if self.is_fixed {
             return Err(Error::AvmError(range_error(
                 activation,
@@ -79,7 +79,7 @@ impl<'gc> VectorStorage<'gc> {
     pub fn from_values(
         storage: Vec<Value<'gc>>,
         is_fixed: bool,
-        value_type: ClassObject<'gc>,
+        value_type: Option<ClassObject<'gc>>,
     ) -> Self {
         VectorStorage {
             storage,
@@ -117,20 +117,33 @@ impl<'gc> VectorStorage<'gc> {
 
     /// Get the default value for this vector.
     pub fn default(&self, activation: &mut Activation<'_, 'gc>) -> Value<'gc> {
-        if Object::ptr_eq(self.value_type, activation.avm2().classes().int)
-            || Object::ptr_eq(self.value_type, activation.avm2().classes().uint)
-        {
-            Value::Integer(0)
-        } else if Object::ptr_eq(self.value_type, activation.avm2().classes().number) {
-            Value::Number(0.0)
+        if let Some(value_type) = self.value_type {
+            if Object::ptr_eq(value_type, activation.avm2().classes().int)
+                || Object::ptr_eq(value_type, activation.avm2().classes().uint)
+            {
+                Value::Integer(0)
+            } else if Object::ptr_eq(value_type, activation.avm2().classes().number) {
+                Value::Number(0.0)
+            } else {
+                Value::Null
+            }
         } else {
             Value::Null
         }
     }
 
-    /// Get the value type this vector coerces things to.
-    pub fn value_type(&self) -> ClassObject<'gc> {
+    /// Get the value type stored in this vector (same as the class <T> type).
+    pub fn value_type(&self) -> Option<ClassObject<'gc>> {
         self.value_type
+    }
+
+    /// Get the value type this vector coerces things to.
+    pub fn value_type_for_coercion(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> ClassObject<'gc> {
+        self.value_type
+            .unwrap_or_else(|| activation.avm2().classes().object)
     }
 
     /// Check if a vector index is in bounds.
@@ -162,8 +175,11 @@ impl<'gc> VectorStorage<'gc> {
         } else {
             Err(Error::AvmError(range_error(
                 activation,
-                &format!("{pos} is outside the range of the vector"),
-                0,
+                &format!(
+                    "Error #1125: The index {pos} is out of range {}.",
+                    self.length()
+                ),
+                1125,
             )?))
         }
     }
@@ -193,8 +209,11 @@ impl<'gc> VectorStorage<'gc> {
         } else {
             Err(Error::AvmError(range_error(
                 activation,
-                &format!("{pos} is outside the range of the vector"),
-                0,
+                &format!(
+                    "Error #1125: The index {pos} is out of range {}.",
+                    self.length()
+                ),
+                1125,
             )?))
         }
     }
@@ -224,15 +243,20 @@ impl<'gc> VectorStorage<'gc> {
     pub fn pop(&mut self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         self.check_fixed(activation)?;
 
-        match self.storage.pop() {
-            Some(v) => Ok(v),
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().uint) => {
+        if let Some(v) = self.storage.pop() {
+            Ok(v)
+        } else if let Some(value_type) = self.value_type() {
+            if Object::ptr_eq(value_type, activation.avm2().classes().uint)
+                || Object::ptr_eq(value_type, activation.avm2().classes().int)
+            {
                 Ok(Value::Integer(0))
+            } else if Object::ptr_eq(value_type, activation.avm2().classes().number) {
+                Ok(Value::Number(0.0))
+            } else {
+                Ok(Value::Undefined)
             }
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().int) => {
-                Ok(Value::Integer(0))
-            }
-            None => Ok(Value::Undefined),
+        } else {
+            Ok(Value::Undefined)
         }
     }
 
@@ -265,21 +289,20 @@ impl<'gc> VectorStorage<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         self.check_fixed(activation)?;
 
-        let unshifted = if self.storage.is_empty() {
-            None
+        if !self.storage.is_empty() {
+            Ok(self.storage.remove(0))
+        } else if let Some(value_type) = self.value_type() {
+            if Object::ptr_eq(value_type, activation.avm2().classes().uint)
+                || Object::ptr_eq(value_type, activation.avm2().classes().int)
+            {
+                Ok(Value::Integer(0))
+            } else if Object::ptr_eq(value_type, activation.avm2().classes().number) {
+                Ok(Value::Number(0.0))
+            } else {
+                Ok(Value::Undefined)
+            }
         } else {
-            Some(self.storage.remove(0))
-        };
-
-        match unshifted {
-            Some(v) => Ok(v),
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().uint) => {
-                Ok(Value::Integer(0))
-            }
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().int) => {
-                Ok(Value::Integer(0))
-            }
-            None => Ok(Value::Undefined),
+            Ok(Value::Undefined)
         }
     }
 
@@ -334,7 +357,14 @@ impl<'gc> VectorStorage<'gc> {
         };
 
         if position >= self.storage.len() {
-            Err(format!("RangeError: Index {position} extends beyond the end of the vector").into())
+            Err(Error::AvmError(range_error(
+                activation,
+                &format!(
+                    "Error #1125: The index {position} is out of range {}.",
+                    self.length()
+                ),
+                1125,
+            )?))
         } else {
             Ok(self.storage.remove(position))
         }

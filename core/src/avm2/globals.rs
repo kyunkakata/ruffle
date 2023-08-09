@@ -36,6 +36,7 @@ mod string;
 mod toplevel;
 mod r#uint;
 mod vector;
+mod void;
 mod xml;
 mod xml_list;
 
@@ -52,6 +53,7 @@ pub struct SystemClasses<'gc> {
     pub number: ClassObject<'gc>,
     pub int: ClassObject<'gc>,
     pub uint: ClassObject<'gc>,
+    pub void: ClassObject<'gc>,
     pub namespace: ClassObject<'gc>,
     pub array: ClassObject<'gc>,
     pub movieclip: ClassObject<'gc>,
@@ -83,7 +85,10 @@ pub struct SystemClasses<'gc> {
     pub sprite: ClassObject<'gc>,
     pub simplebutton: ClassObject<'gc>,
     pub regexp: ClassObject<'gc>,
-    pub vector: ClassObject<'gc>,
+    // the generic Vector class, useless until you .apply() type arg onto it
+    pub generic_vector: ClassObject<'gc>,
+    // Vector.<*>, NOT Vector.<Object>. Used as base class for new Vector<T>.
+    pub object_vector: ClassObject<'gc>,
     pub soundtransform: ClassObject<'gc>,
     pub soundchannel: ClassObject<'gc>,
     pub bitmap: ClassObject<'gc>,
@@ -145,6 +150,7 @@ pub struct SystemClasses<'gc> {
     pub netstatusevent: ClassObject<'gc>,
     pub shaderfilter: ClassObject<'gc>,
     pub statusevent: ClassObject<'gc>,
+    pub contextmenuevent: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -172,6 +178,7 @@ impl<'gc> SystemClasses<'gc> {
             number: object,
             int: object,
             uint: object,
+            void: object,
             namespace: object,
             array: object,
             movieclip: object,
@@ -203,7 +210,8 @@ impl<'gc> SystemClasses<'gc> {
             sprite: object,
             simplebutton: object,
             regexp: object,
-            vector: object,
+            generic_vector: object,
+            object_vector: object,
             soundtransform: object,
             soundchannel: object,
             bitmap: object,
@@ -265,6 +273,7 @@ impl<'gc> SystemClasses<'gc> {
             netstatusevent: object,
             shaderfilter: object,
             statusevent: object,
+            contextmenuevent: object,
         }
     }
 }
@@ -362,6 +371,41 @@ fn class<'gc>(
     domain.export_class(class_def, activation.context.gc_context);
 
     Ok(class_object)
+}
+
+fn vector_class<'gc>(
+    param_class: Option<ClassObject<'gc>>,
+    legacy_name: &'static str,
+    script: Script<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<ClassObject<'gc>, Error<'gc>> {
+    let mc = activation.context.gc_context;
+    let (_, mut global, mut domain) = script.init();
+
+    let cls = param_class.map(|c| c.inner_class_definition());
+    let vector_cls = class(
+        vector::create_builtin_class(activation, cls),
+        script,
+        activation,
+    )?;
+    vector_cls.set_param(activation, Some(param_class));
+
+    let generic_vector = activation.avm2().classes().generic_vector;
+    generic_vector.add_application(activation, param_class, vector_cls);
+    let generic_cls = generic_vector.inner_class_definition();
+    generic_cls
+        .write(mc)
+        .add_application(cls, vector_cls.inner_class_definition());
+
+    let legacy_name = QName::new(activation.avm2().vector_internal_namespace, legacy_name);
+    global.install_const_late(
+        mc,
+        legacy_name,
+        vector_cls.into(),
+        activation.avm2().classes().class,
+    );
+    domain.export_definition(legacy_name, script, mc);
+    Ok(vector_cls)
 }
 
 macro_rules! avm2_system_class {
@@ -509,6 +553,10 @@ pub fn load_player_globals<'gc>(
     );
     avm2_system_class!(array, activation, array::create_class(activation), script);
 
+    // TODO: this should _not_ be exposed as a ClassObject, getDefinitionByName etc.
+    // it should only be visible as an type for typecheck/cast purposes.
+    avm2_system_class!(void, activation, void::create_class(activation), script);
+
     function(activation, "", "trace", toplevel::trace, script)?;
     function(
         activation,
@@ -569,7 +617,38 @@ pub fn load_player_globals<'gc>(
     )?;
     function(activation, "", "unescape", toplevel::unescape, script)?;
 
-    avm2_system_class!(vector, activation, vector::create_class(activation), script);
+    avm2_system_class!(
+        generic_vector,
+        activation,
+        vector::create_generic_class(activation),
+        script
+    );
+
+    vector_class(
+        Some(activation.avm2().classes().int),
+        "Vector$int",
+        script,
+        activation,
+    )?;
+    vector_class(
+        Some(activation.avm2().classes().uint),
+        "Vector$uint",
+        script,
+        activation,
+    )?;
+    vector_class(
+        Some(activation.avm2().classes().number),
+        "Vector$double",
+        script,
+        activation,
+    )?;
+    let object_vector = vector_class(None, "Vector$object", script, activation)?;
+    activation
+        .avm2()
+        .system_classes
+        .as_mut()
+        .unwrap()
+        .object_vector = object_vector;
 
     avm2_system_class!(date, activation, date::create_class(activation), script);
 
@@ -726,6 +805,7 @@ fn load_playerglobal<'gc>(
             ("flash.events", "UncaughtErrorEvents", uncaughterrorevents),
             ("flash.events", "NetStatusEvent", netstatusevent),
             ("flash.events", "StatusEvent", statusevent),
+            ("flash.events", "ContextMenuEvent", contextmenuevent),
             ("flash.geom", "Matrix", matrix),
             ("flash.geom", "Point", point),
             ("flash.geom", "Rectangle", rectangle),

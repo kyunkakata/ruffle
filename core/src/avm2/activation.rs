@@ -5,13 +5,13 @@ use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::e4x::{escape_attribute_value, escape_element_value};
 use crate::avm2::error::{
-    argument_error, make_null_or_undefined_error, make_reference_error, type_error,
-    ReferenceErrorCode,
+    argument_error, make_error_1127, make_error_1506, make_null_or_undefined_error,
+    make_reference_error, type_error, ReferenceErrorCode,
 };
 use crate::avm2::method::{BytecodeMethod, Method, ParamConfig};
 use crate::avm2::object::{
-    ArrayObject, ByteArrayObject, ClassObject, FunctionObject, NamespaceObject, ScriptObject,
-    XmlListObject,
+    ArrayObject, ByteArrayObject, ClassObject, E4XOrXml, FunctionObject, NamespaceObject,
+    ScriptObject, XmlListObject,
 };
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::scope::{search_scope_stack, Scope, ScopeChain};
@@ -33,8 +33,6 @@ use swf::avm2::types::{
     Class as AbcClass, Exception, Index, Method as AbcMethod, MethodFlags as AbcMethodFlags,
     Multiname as AbcMultiname, Namespace as AbcNamespace, Op,
 };
-
-use super::object::QNameObject;
 
 /// Represents a particular register set.
 ///
@@ -1775,12 +1773,28 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let multiname = self.pool_multiname_and_initialize(method, index)?;
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
-        let descendants = object.call_public_property(
-            "descendants",
-            &[QNameObject::from_name(self, (*multiname).clone())?.into()],
-            self,
-        )?;
-        self.push_stack(descendants);
+        if let Some(descendants) = object.xml_descendants(self, &multiname) {
+            self.push_stack(descendants);
+        } else {
+            // Even if it's an object with the "descendants" property, we won't support it.
+            let class_name = object
+                .instance_of()
+                .map(|cls| {
+                    cls.inner_class_definition()
+                        .read()
+                        .name()
+                        .to_qualified_name_err_message(self.context.gc_context)
+                })
+                .unwrap_or_else(|| AvmString::from("<UNKNOWN>"));
+            return Err(Error::AvmError(type_error(
+                self,
+                &format!(
+                    "Error #1016: Descendants operator (..) not supported on type {}",
+                    class_name
+                ),
+                1016,
+            )?));
+        }
 
         Ok(FrameControl::Continue)
     }
@@ -1953,17 +1967,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let base = self
             .pop_stack()
             .as_object()
-            .ok_or("Cannot specialize null or undefined")?;
+            .ok_or_else(|| make_error_1127(self))?;
 
-        if args.len() > 1 {
-            return Err(format!(
-                "VerifyError: Cannot specialize classes with more than one parameter, {} given",
-                args.len()
-            )
-            .into());
-        }
+        let applied = base.apply(self, &args)?;
 
-        let applied = base.apply(self, args[0])?;
         self.push_stack(applied);
 
         Ok(FrameControl::Continue)
@@ -2119,6 +2126,29 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Value::Object(Object::XmlListObject(value1)),
                 Value::Object(Object::XmlListObject(value2)),
             ) => Value::Object(XmlListObject::concat(self, value1, value2).into()),
+            (
+                Value::Object(Object::XmlListObject(value1)),
+                Value::Object(Object::XmlObject(value2)),
+            ) => {
+                let mut children = value1.children().clone();
+                children.push(E4XOrXml::Xml(value2));
+                XmlListObject::new(self, children, None).into()
+            }
+            (
+                Value::Object(Object::XmlObject(value1)),
+                Value::Object(Object::XmlListObject(value2)),
+            ) => {
+                let mut children = vec![E4XOrXml::Xml(value1)];
+                children.extend(value2.children().clone());
+                XmlListObject::new(self, children, None).into()
+            }
+            (
+                Value::Object(Object::XmlObject(value1)),
+                Value::Object(Object::XmlObject(value2)),
+            ) => {
+                let children = vec![E4XOrXml::Xml(value1), E4XOrXml::Xml(value2)];
+                XmlListObject::new(self, children, None).into()
+            }
             (value1, value2) => {
                 let prim_value1 = value1.coerce_to_primitive(None, self)?;
                 let prim_value2 = value2.coerce_to_primitive(None, self)?;
@@ -2989,9 +3019,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
 
-        let address =
-            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
-        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+        let Ok(address) = usize::try_from(address) else {
+            return Err(make_error_1506(self));
+        };
+
+        if address >= dm.len() {
+            return Err(make_error_1506(self));
+        }
+
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)
+            .map_err(|e| e.to_avm(self))?;
 
         Ok(FrameControl::Continue)
     }
@@ -3006,9 +3043,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
 
-        let address =
-            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
-        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+        let Ok(address) = usize::try_from(address) else {
+            return Err(make_error_1506(self));
+        };
+        if address + 2 > dm.len() {
+            return Err(make_error_1506(self));
+        }
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)
+            .map_err(|e| e.to_avm(self))?;
 
         Ok(FrameControl::Continue)
     }
@@ -3023,9 +3065,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
 
-        let address =
-            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
-        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+        let Ok(address) = usize::try_from(address) else {
+            return Err(make_error_1506(self));
+        };
+        if address + 4 > dm.len() {
+            return Err(make_error_1506(self));
+        }
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)
+            .map_err(|e| e.to_avm(self))?;
 
         Ok(FrameControl::Continue)
     }
@@ -3040,9 +3087,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
 
-        let address =
-            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
-        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+        let Ok(address) = usize::try_from(address) else {
+            return Err(make_error_1506(self));
+        };
+        if address + 4 > dm.len() {
+            return Err(make_error_1506(self));
+        }
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)
+            .map_err(|e| e.to_avm(self))?;
 
         Ok(FrameControl::Continue)
     }
@@ -3057,9 +3109,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .as_bytearray_mut(self.context.gc_context)
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
 
-        let address =
-            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
-        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+        let Ok(address) = usize::try_from(address) else {
+            return Err(make_error_1506(self));
+        };
+        if address + 8 > dm.len() {
+            return Err(make_error_1506(self));
+        }
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)
+            .map_err(|e| e.to_avm(self))?;
 
         Ok(FrameControl::Continue)
     }
@@ -3077,7 +3134,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Some(val) = val {
             self.push_stack(val);
         } else {
-            return Err("RangeError: The specified range is invalid".into());
+            return Err(make_error_1506(self));
         }
 
         Ok(FrameControl::Continue)
@@ -3091,6 +3148,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        if dm.len() < address + 2 {
+            return Err(make_error_1506(self));
+        }
+
         let val = dm.read_at(2, address).map_err(|e| e.to_avm(self))?;
         self.push_stack(u16::from_le_bytes(val.try_into().unwrap()));
 
@@ -3105,6 +3167,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        if dm.len() < address + 4 {
+            return Err(make_error_1506(self));
+        }
+
         let val = dm.read_at(4, address).map_err(|e| e.to_avm(self))?;
         self.push_stack(i32::from_le_bytes(val.try_into().unwrap()));
         Ok(FrameControl::Continue)
@@ -3118,6 +3185,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        if dm.len() < address + 4 {
+            return Err(make_error_1506(self));
+        }
+
         let val = dm.read_at(4, address).map_err(|e| e.to_avm(self))?;
         self.push_stack(f32::from_le_bytes(val.try_into().unwrap()));
 
@@ -3132,6 +3204,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let dm = dm
             .as_bytearray()
             .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        if dm.len() < address + 8 {
+            return Err(make_error_1506(self));
+        }
+
         let val = dm.read_at(8, address).map_err(|e| e.to_avm(self))?;
         self.push_stack(f64::from_le_bytes(val.try_into().unwrap()));
         Ok(FrameControl::Continue)

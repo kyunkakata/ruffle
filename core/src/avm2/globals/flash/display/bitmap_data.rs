@@ -297,10 +297,9 @@ pub fn get_pixels<'gc>(
         bitmap_data.check_valid(activation)?;
         let rectangle = args.get_object(activation, 0, "rect")?;
         let (x, y, width, height) = get_rectangle_x_y_width_height(activation, rectangle)?;
-        let bytearray = ByteArrayObject::from_storage(
-            activation,
-            operations::get_pixels_as_byte_array(bitmap_data, x, y, width, height)?,
-        )?;
+        let storage =
+            operations::get_pixels_as_byte_array(activation, bitmap_data, x, y, width, height)?;
+        let bytearray = ByteArrayObject::from_storage(activation, storage)?;
         return Ok(bytearray.into());
     }
 
@@ -320,7 +319,7 @@ pub fn get_vector<'gc>(
         let pixels = operations::get_vector(bitmap_data, x, y, width, height);
 
         let value_type = activation.avm2().classes().uint;
-        let new_storage = VectorStorage::from_values(pixels, false, value_type);
+        let new_storage = VectorStorage::from_values(pixels, false, Some(value_type));
 
         return Ok(VectorObject::from_vector(new_storage, activation)?.into());
     }
@@ -1455,6 +1454,58 @@ pub fn pixel_dissolve<'gc>(
                 fill_color,
             )
             .into());
+        }
+    }
+
+    Ok(Value::Undefined)
+}
+
+// Implements `BitmapData.merge`.
+pub fn merge<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(bitmap_data) = this.as_bitmap_data() {
+        if !bitmap_data.disposed() {
+            let src_bitmap = args.get_object(activation, 0, "sourceBitmapData")?;
+
+            let (src_min_x, src_min_y, src_width, src_height) = {
+                let source_rect = args.get_object(activation, 1, "sourceRect")?;
+                get_rectangle_x_y_width_height(activation, source_rect)?
+            };
+
+            let dest_point = {
+                let dest_point = args.get_object(activation, 2, "destPoint")?;
+
+                let x = dest_point
+                    .get_public_property("x", activation)?
+                    .coerce_to_i32(activation)?;
+
+                let y = dest_point
+                    .get_public_property("y", activation)?
+                    .coerce_to_i32(activation)?;
+
+                (x, y)
+            };
+
+            let red_mult = args.get_i32(activation, 3)?;
+            let green_mult = args.get_i32(activation, 4)?;
+            let blue_mult = args.get_i32(activation, 5)?;
+            let alpha_mult = args.get_i32(activation, 6)?;
+
+            if let Some(src_bitmap) = src_bitmap.as_bitmap_data() {
+                if !src_bitmap.disposed() {
+                    operations::merge(
+                        activation.context.gc_context,
+                        bitmap_data,
+                        src_bitmap,
+                        (src_min_x, src_min_y, src_width, src_height),
+                        dest_point,
+                        (red_mult, green_mult, blue_mult, alpha_mult),
+                    );
+                }
+            }
         }
     }
 

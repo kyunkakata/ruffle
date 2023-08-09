@@ -1,3 +1,7 @@
+// This lint is helpful, but right now we have too many instances of it.
+// TODO: Remove this once all instances are fixed.
+#![allow(clippy::needless_pass_by_ref_mut)]
+
 use ruffle_core::context::UpdateContext;
 use ruffle_core::external::Value as ExternalValue;
 use ruffle_core::external::{ExternalInterfaceMethod, ExternalInterfaceProvider};
@@ -47,8 +51,4 @@ impl ExternalInterfaceProvider for ExternalInterfaceTestProvider {
     }
 
     fn on_callback_available(&self, _name: &str) {}
-
-    fn on_fs_command(&self, _command: &str, _args: &str) -> bool {
-        false
-    }
 }

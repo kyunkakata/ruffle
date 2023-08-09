@@ -15,7 +15,8 @@ use ruffle_core::config::{Letterbox, NetworkingAccessMode};
 use ruffle_core::context::UpdateContext;
 use ruffle_core::events::{KeyCode, MouseButton, MouseWheelDelta, TextControlCode};
 use ruffle_core::external::{
-    ExternalInterfaceMethod, ExternalInterfaceProvider, Value as ExternalValue, Value,
+    ExternalInterfaceMethod, ExternalInterfaceProvider, FsCommandProvider, Value as ExternalValue,
+    Value,
 };
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{
@@ -121,8 +122,12 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = "isVirtualKeyboardFocused")]
     fn is_virtual_keyboard_focused(this: &JavascriptPlayer) -> bool;
+
+    #[wasm_bindgen(method, js_name = "displayUnsupportedVideo")]
+    fn display_unsupported_video(this: &JavascriptPlayer, url: &str);
 }
 
+#[derive(Clone)]
 struct JavascriptInterface {
     js_player: JavascriptPlayer,
 }
@@ -557,8 +562,10 @@ impl Ruffle {
 
         // Create the external interface.
         if allow_script_access && allow_networking == NetworkingAccessMode::All {
+            let interface = Box::new(JavascriptInterface::new(js_player.clone()));
             builder = builder
-                .with_external_interface(Box::new(JavascriptInterface::new(js_player.clone())));
+                .with_external_interface(interface.clone())
+                .with_fs_commands(interface);
         }
 
         let trace_observer = Rc::new(RefCell::new(JsValue::UNDEFINED));
@@ -1462,7 +1469,9 @@ impl ExternalInterfaceProvider for JavascriptInterface {
     fn on_callback_available(&self, name: &str) {
         self.js_player.on_callback_available(name);
     }
+}
 
+impl FsCommandProvider for JavascriptInterface {
     fn on_fs_command(&self, command: &str, args: &str) -> bool {
         self.js_player
             .on_fs_command(command, args)

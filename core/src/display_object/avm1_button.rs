@@ -40,6 +40,8 @@ pub struct Avm1ButtonData<'gc> {
     state: ButtonState,
     hit_area: BTreeMap<Depth, DisplayObject<'gc>>,
     container: ChildContainer<'gc>,
+    #[allow(dead_code)]
+    #[collect(require_static)]
     tracking: ButtonTracking,
     object: Option<Object<'gc>>,
     initialized: bool,
@@ -174,7 +176,7 @@ impl<'gc> Avm1Button<'gc> {
                 // Set transform of child (and modify previous child if it already existed)
                 child.set_matrix(context.gc_context, record.matrix.into());
                 child.set_color_transform(context.gc_context, record.color_transform);
-                child.set_blend_mode(context.gc_context, record.blend_mode);
+                child.set_blend_mode(context.gc_context, record.blend_mode.into());
                 child.set_filters(
                     context.gc_context,
                     record.filters.iter().map(Filter::from).collect(),
@@ -681,8 +683,7 @@ struct ButtonAction {
     key_code: Option<ButtonKeyCode>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ButtonTracking {
     Push,
     Menu,
