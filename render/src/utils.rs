@@ -1,9 +1,11 @@
 use crate::bitmap::{Bitmap, BitmapFormat};
 use crate::error::Error;
 use std::borrow::Cow;
-use std::io::Read;
 use swf::Color;
-
+use zune_core::options::DecoderOptions;
+use zune_inflate::DeflateDecoder;
+use zune_inflate::DeflateOptions;
+use zune_jpeg::{zune_core, JpegDecoder};
 /// The format of image data in a DefineBitsJpeg2/3 tag.
 /// Generally this will be JPEG, but according to SWF19, these tags can also contain PNG and GIF data.
 /// SWF19 pp.138-139
@@ -157,37 +159,19 @@ fn validate_size(width: u16, height: u16) -> Result<(), Error> {
 /// The decoded bitmap will have pre-multiplied alpha.
 fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Error> {
     let jpeg_data = remove_invalid_jpeg_data(jpeg_data);
+    let options = DecoderOptions::default().jpeg_set_max_scans(4);
+    let mut decoder = JpegDecoder::new_with_options(options, &jpeg_data[..]);
+    let result = decoder.decode();
+    if result.is_err() {
+        return Err(Error::InvalidSize);
+    }
 
-    let mut decoder = jpeg_decoder::Decoder::new(&jpeg_data[..]);
-    decoder.read_info()?;
+    let decoded_data = result.unwrap();
+
     let metadata = decoder
         .info()
         .expect("info() should always return Some if read_info returned Ok");
     validate_size(metadata.width, metadata.height)?;
-    let decoded_data = decoder.decode()?;
-
-    let decoded_data = match metadata.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => decoded_data,
-        jpeg_decoder::PixelFormat::CMYK32 => decoded_data
-            .chunks_exact(4)
-            .flat_map(|cmyk| {
-                let c = 255 - u16::from(cmyk[0]);
-                let m = 255 - u16::from(cmyk[1]);
-                let y = 255 - u16::from(cmyk[2]);
-                let k = 255 - u16::from(cmyk[3]);
-
-                let r = c * k / 255;
-                let g = m * k / 255;
-                let b = y * k / 255;
-                [r as u8, g as u8, b as u8]
-            })
-            .collect(),
-        jpeg_decoder::PixelFormat::L8 => decoded_data.iter().flat_map(|&c| [c, c, c]).collect(),
-        jpeg_decoder::PixelFormat::L16 => {
-            tracing::warn!("Unimplemented L16 JPEG pixel format");
-            decoded_data
-        }
-    };
 
     // Decompress the alpha data (DEFLATE compression).
     if let Some(alpha_data) = alpha_data {
@@ -333,49 +317,22 @@ pub fn decode_define_bits_lossless(swf_tag: &swf::DefineBitsLossless) -> Result<
 /// DefineBitsLossless is Zlib encoded pixel data (similar to PNG), possibly
 /// palletized.
 fn decode_png(data: &[u8]) -> Result<Bitmap, Error> {
-    use png::{ColorType, Transformations};
-
-    let mut decoder = png::Decoder::new(data);
     // Normalize output to 8-bit grayscale or RGB.
-    // Ideally we'd want to normalize to 8-bit RGB only, but seems like the `png` crate provides no such a feature.
-    decoder.set_transformations(Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info()?;
+    // Ideally we'd want to normalize to 8-bit RGB only;
+    let options = DecoderOptions::default().png_set_add_alpha_channel(true);
+    let mut decoder = JpegDecoder::new_with_options(options, data);
 
-    let mut data = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut data)?;
+    let decoder_data = decoder.decode().unwrap();
+    let info = decoder
+        .info()
+        .expect("info() should always return Some if read_info returned Ok");
 
-    let (format, data) = match info.color_type {
-        ColorType::Rgb => (BitmapFormat::Rgb, data),
-        ColorType::Rgba => {
-            // In contrast to DefineBitsLossless tags, PNGs embedded in a DefineBitsJPEG tag will not have
-            // premultiplied alpha and need to be converted before sending to the renderer.
-            premultiply_alpha_rgba(&mut data);
-            (BitmapFormat::Rgba, data)
-        }
-        ColorType::Grayscale => (
-            BitmapFormat::Rgb,
-            data.into_iter().flat_map(|v| [v, v, v]).collect(),
-        ),
-        ColorType::GrayscaleAlpha => {
-            (
-                BitmapFormat::Rgba,
-                data.chunks_exact(2)
-                    .flat_map(|pixel| {
-                        // Pre-multiply alpha.
-                        let a = pixel[1];
-                        let v = (u16::from(pixel[0]) * u16::from(a) / 255) as u8;
-                        [v, v, v, a]
-                    })
-                    .collect(),
-            )
-        }
-        ColorType::Indexed => {
-            // Shouldn't get here because of `normalize_to_color8` transformation above.
-            unreachable!("Unexpected PNG ColorType::Indexed");
-        }
-    };
-
-    Ok(Bitmap::new(info.width, info.height, format, data))
+    Ok(Bitmap::new(
+        info.width.into(),
+        info.height.into(),
+        BitmapFormat::Rgba,
+        decoder_data,
+    ))
 }
 
 /// Decodes the bitmap data in DefineBitsLossless tag into RGBA.
@@ -423,11 +380,8 @@ pub fn unmultiply_alpha_rgba(rgba: &mut [u8]) {
 
 /// Decodes zlib-compressed data.
 fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut out_data = Vec::new();
-    let mut decoder = flate2::bufread::ZlibDecoder::new(data);
-    decoder
-        .read_to_end(&mut out_data)
-        .map_err(|_| Error::InvalidZlibCompression)?;
-    out_data.shrink_to_fit();
-    Ok(out_data)
+    let options = DeflateOptions::default().set_confirm_checksum(false);
+    let mut decoder = DeflateDecoder::new_with_options(data, options);
+    let decompressed = decoder.decode_zlib().unwrap();
+    Ok(decompressed)
 }

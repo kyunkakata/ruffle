@@ -28,6 +28,8 @@ num-traits = "0.2"
 num-derive = "0.4"
 byteorder = "1.4"
 wgpu = { workspace = true, optional = true }
+zune-jpeg = "0.3.17"
+zune-inflate = "0.2.54"
 
 # This crate has a `compile_error!` on apple platforms
 [target.'cfg(not(target_vendor = "apple"))'.dependencies.renderdoc]
