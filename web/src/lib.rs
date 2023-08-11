@@ -680,6 +680,16 @@ impl Ruffle {
                     let touch = touch_event.touches().get(0).unwrap();
 
                     let _ = ruffle.with_instance_mut(move |instance| {
+                        // set pointer capture
+                        if let Some(target) = touch_event.target() {
+                            if let Err(e) = target
+                                .unchecked_ref::<Element>()
+                                .set_pointer_capture(touch.identifier())
+                            {
+                                tracing::warn!("Unable to set pointer capture: {:?}", e);
+                            }
+                        }
+
                         let device_pixel_ratio = instance.device_pixel_ratio;
                         // Calculate offset from canvas.
                         let canvas = instance.canvas.clone();
@@ -756,6 +766,16 @@ impl Ruffle {
                 // Create touchend callback.
                 let touch_up_callback = Closure::new(move |touch_event: TouchEvent| {
                     let _ = ruffle.with_instance(|instance| {
+                        if let Some(target) = touch_event.target() {
+                            if let Err(e) =
+                                target.unchecked_ref::<Element>().release_pointer_capture(
+                                    touch_event.changed_touches().get(0).unwrap().identifier(),
+                                )
+                            {
+                                tracing::warn!("Unable to release pointer capture: {:?}", e);
+                            }
+                        }
+
                         let event = PlayerEvent::MouseUp {
                             x: instance.last_offset_x * instance.device_pixel_ratio,
                             y: instance.last_offset_y * instance.device_pixel_ratio,
