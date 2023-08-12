@@ -36,6 +36,7 @@ mod text;
 mod video;
 
 use crate::avm1::Activation;
+use crate::display_object::bitmap::BitmapWeak;
 pub use crate::display_object::container::{
     dispatch_added_event_only, dispatch_added_to_stage_event_only, DisplayObjectContainer,
     TDisplayObjectContainer,
@@ -771,7 +772,11 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
     let cache_info = if context.use_bitmap_cache && this.is_bitmap_cached() {
         let mut cache_info: Option<DrawCacheInfo> = None;
         let base_transform = context.transform_stack.transform();
-        let bounds: Rectangle<Twips> = this.bounds_with_transform(&base_transform.matrix);
+        let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
+            &base_transform.matrix,
+            false, // we want to do the filter growth for this object ourselves, to know the offsets
+            &context.stage.view_matrix(),
+        );
         let name = this.name();
         let mut filters: Vec<Filter> = this.filters();
         let swf_version = this.swf_version();
@@ -784,17 +789,23 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
                 let width = width as u16;
                 let height = height as u16;
                 let mut filter_rect = Rectangle {
-                    x_min: 0,
-                    x_max: width as i32,
-                    y_min: 0,
-                    y_max: height as i32,
+                    x_min: Twips::ZERO,
+                    x_max: Twips::from_pixels_i32(width as i32),
+                    y_min: Twips::ZERO,
+                    y_max: Twips::from_pixels_i32(height as i32),
                 };
                 let stage_matrix = context.stage.view_matrix();
                 for filter in &mut filters {
                     // Scaling is done by *stage view matrix* only, nothing in-between
                     filter.scale(stage_matrix.a, stage_matrix.d);
-                    filter_rect = context.renderer.calculate_dest_rect(filter, filter_rect);
+                    filter_rect = filter.calculate_dest_rect(filter_rect);
                 }
+                let filter_rect = Rectangle {
+                    x_min: filter_rect.x_min.to_pixels().floor() as i32,
+                    x_max: filter_rect.x_max.to_pixels().ceil() as i32,
+                    y_min: filter_rect.y_min.to_pixels().floor() as i32,
+                    y_max: filter_rect.y_max.to_pixels().ceil() as i32,
+                };
                 let draw_offset = Point::new(filter_rect.x_min, filter_rect.y_min);
                 if cache.is_dirty(&base_transform.matrix, width, height) {
                     cache.update(
@@ -873,7 +884,7 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
                 use_bitmap_cache: true,
                 stage: context.stage,
             };
-            render_base_inner(this, &mut offscreen_context);
+            this.render_self(&mut offscreen_context);
             offscreen_context.cache_draws.push(BitmapCacheEntry {
                 handle: cache_info.handle.clone(),
                 commands: offscreen_context.commands,
@@ -883,12 +894,54 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
         }
 
         // When rendering it back, ensure we're only keeping the translation - scale/rotation is within the image already
+
+        let scroll_rect = this.scroll_rect();
+        let (scroll_x, scroll_y, scroll_mask_matrix) = if let Some(rect) = &scroll_rect {
+            (
+                -rect.x_min,
+                -rect.y_min,
+                Some(Matrix::create_box(
+                    rect.width().to_pixels() as f32,
+                    rect.height().to_pixels() as f32,
+                    0.0,
+                    cache_info.base_transform.matrix.tx,
+                    cache_info.base_transform.matrix.ty,
+                )),
+            )
+        } else {
+            (Twips::ZERO, Twips::ZERO, None)
+        };
+
+        // TODO: This should probably be a `render_bitmap_with_alpha_mask` or something.
+        // This logic is temporarily just copy pasted regular masks, but it's wrong;
+        // CAB masks just use the mask alpha channel to replace the CAB texture
+        let mask = this.masker();
+        let mut mask_transform = ruffle_render::transform::Transform::default();
+        if let Some(m) = mask {
+            mask_transform.matrix = this.global_to_local_matrix().unwrap_or_default();
+            mask_transform.matrix *= m.local_to_global_matrix();
+            mask_transform.matrix.tx += scroll_x;
+            mask_transform.matrix.ty += scroll_y;
+            context.commands.push_mask();
+            context.transform_stack.push(&mask_transform);
+            m.render_self(context);
+            context.transform_stack.pop();
+            context.commands.activate_mask();
+        }
+
+        if let Some(scroll_mask_matrix) = scroll_mask_matrix {
+            context.commands.push_mask();
+            // The color doesn't matter, as this is a mask.
+            context.commands.draw_rect(Color::WHITE, scroll_mask_matrix);
+            context.commands.activate_mask();
+        }
+
         context.commands.render_bitmap(
             cache_info.handle,
             Transform {
                 matrix: Matrix {
-                    tx: cache_info.base_transform.matrix.tx + offset_x,
-                    ty: cache_info.base_transform.matrix.ty + offset_y,
+                    tx: cache_info.base_transform.matrix.tx + offset_x + scroll_x,
+                    ty: cache_info.base_transform.matrix.ty + offset_y + scroll_y,
                     ..Default::default()
                 },
                 color_transform: cache_info.base_transform.color_transform,
@@ -896,12 +949,31 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
             true,
             PixelSnapping::Always, // cacheAsBitmap forces pixel snapping
         );
+
+        if let Some(scroll_mask_matrix) = scroll_mask_matrix {
+            // Draw the rectangle again after deactivating the mask,
+            // to reset the stencil buffer.
+            context.commands.deactivate_mask();
+            context.commands.draw_rect(Color::WHITE, scroll_mask_matrix);
+            context.commands.pop_mask();
+        }
+
+        if let Some(m) = mask {
+            context.commands.deactivate_mask();
+            context.transform_stack.push(&mask_transform);
+            m.render_self(context);
+            context.transform_stack.pop();
+            context.commands.pop_mask();
+        }
     } else {
         if let Some(background) = this.opaque_background() {
             // This is intended for use with cacheAsBitmap, but can be set for non-cached objects too
             // It wants the entire bounding box to be cleared before any draws happen
-            let bounds: Rectangle<Twips> =
-                this.bounds_with_transform(&context.transform_stack.transform().matrix);
+            let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
+                &context.transform_stack.transform().matrix,
+                true,
+                &context.stage.view_matrix(),
+            );
             context.commands.draw_rect(
                 background,
                 Matrix::create_box(
@@ -1098,6 +1170,37 @@ pub trait TDisplayObject<'gc>:
             for child in ctr.iter_render_list() {
                 let matrix = *matrix * *child.base().matrix();
                 bounds = bounds.union(&child.bounds_with_transform(&matrix));
+            }
+        }
+
+        bounds
+    }
+
+    /// Gets the **render bounds** of this object and all its children.
+    /// This differs from the bounds that are exposed to Flash, in two main ways:
+    /// - It may be larger if filters are applied which will increase the size of what's shown
+    /// - It does not respect scroll rects
+    fn render_bounds_with_transform(
+        &self,
+        matrix: &Matrix,
+        include_own_filters: bool,
+        view_matrix: &Matrix,
+    ) -> Rectangle<Twips> {
+        let mut bounds = *matrix * self.self_bounds();
+
+        if let Some(ctr) = self.as_container() {
+            for child in ctr.iter_render_list() {
+                let matrix = *matrix * *child.base().matrix();
+                bounds =
+                    bounds.union(&child.render_bounds_with_transform(&matrix, true, view_matrix));
+            }
+        }
+
+        if include_own_filters {
+            let filters = self.filters();
+            for mut filter in filters {
+                filter.scale(view_matrix.a, view_matrix.d);
+                bounds = filter.calculate_dest_rect(bounds);
             }
         }
 
@@ -1523,7 +1626,10 @@ pub trait TDisplayObject<'gc>:
             if let Some(old_masker) = self.base().masker() {
                 old_masker.set_maskee(gc_context, None, false);
             }
-            self.invalidate_cached_bitmap(gc_context);
+            if let Some(parent) = self.parent() {
+                // Masks are natively handled by cacheAsBitmap - don't invalidate self, only parents
+                parent.invalidate_cached_bitmap(gc_context);
+            }
         }
         self.base_mut(gc_context).set_masker(node);
     }
@@ -1559,7 +1665,11 @@ pub trait TDisplayObject<'gc>:
         rectangle: Rectangle<Twips>,
     ) {
         self.base_mut(gc_context).next_scroll_rect = rectangle;
-        self.invalidate_cached_bitmap(gc_context);
+
+        // Scroll rect is natively handled by cacheAsBitmap - don't invalidate self, only parents
+        if let Some(parent) = self.parent() {
+            parent.invalidate_cached_bitmap(gc_context);
+        }
     }
 
     /// Whether this object has been removed. Only applies to AVM1.
@@ -2285,6 +2395,7 @@ impl<'gc> DisplayObject<'gc> {
         match self {
             DisplayObject::MovieClip(mc) => DisplayObjectWeak::MovieClip(mc.downgrade()),
             DisplayObject::LoaderDisplay(l) => DisplayObjectWeak::LoaderDisplay(l.downgrade()),
+            DisplayObject::Bitmap(b) => DisplayObjectWeak::Bitmap(b.downgrade()),
             _ => panic!("Downgrade not yet implemented for {:?}", self),
         }
     }
@@ -2520,6 +2631,7 @@ impl Default for SoundTransform {
 pub enum DisplayObjectWeak<'gc> {
     MovieClip(MovieClipWeak<'gc>),
     LoaderDisplay(LoaderDisplayWeak<'gc>),
+    Bitmap(BitmapWeak<'gc>),
 }
 
 impl<'gc> DisplayObjectWeak<'gc> {
@@ -2527,6 +2639,7 @@ impl<'gc> DisplayObjectWeak<'gc> {
         match self {
             DisplayObjectWeak::MovieClip(mc) => mc.as_ptr(),
             DisplayObjectWeak::LoaderDisplay(ld) => ld.as_ptr(),
+            DisplayObjectWeak::Bitmap(b) => b.as_ptr(),
         }
     }
 
@@ -2534,6 +2647,7 @@ impl<'gc> DisplayObjectWeak<'gc> {
         match self {
             DisplayObjectWeak::MovieClip(movie) => movie.upgrade(mc).map(|m| m.into()),
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
+            DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
     }
 }
