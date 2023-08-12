@@ -40,7 +40,7 @@
         "chromedriver": "^115.0.0"
     },
     "scripts": {
-        "build": "npm run build --workspace=ruffle-core && npm run build --workspace=ruffle-demo --workspace=ruffle-extension --workspace=ruffle-selfhosted",
+        "build": "npm run build --workspace=ruffle-core && npm run build --workspace=ruffle-selfhosted",
         "build:debug": "cross-env NODE_ENV=development CARGO_FEATURES=avm_debug npm run build",
         "build:dual-wasm": "cross-env ENABLE_WASM_EXTENSIONS=true npm run build",
         "build:repro": "cross-env ENABLE_WASM_EXTENSIONS=true ENABLE_CARGO_CLEAN=true ENABLE_VERSION_SEAL=true npm run build",

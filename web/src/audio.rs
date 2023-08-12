@@ -157,10 +157,10 @@ impl Buffer {
         //  ~1: we are just barely keeping up with feeding the output
         //  >1: we are falling behind, audio stutters
         let progress = (buffer_timestep - time_left) / buffer_timestep;
-        tracing::trace!(
-            "Audio buffer progress when filling the next one: {}%",
-            progress * 100.0
-        );
+        // tracing::trace!(
+        //     "Audio buffer progress when filling the next one: {}%",
+        //     progress * 100.0
+        // );
 
         if progress < WebAudioBackend::NORMAL_PROGRESS_RANGE_MIN {
             // This fill is considered quick, let's count it.
@@ -209,7 +209,7 @@ impl Buffer {
         // In case buffer_size changed above (or in the latest call in the other instance),
         // we need to recaulculate/recreate/resize a couple of things that depend on it.
         if self.js_buffer.length() != self.buffer_size.get() {
-            tracing::trace!("Recreating JS side buffer with new length");
+            // tracing::trace!("Recreating JS side buffer with new length");
             buffer_timestep =
                 f64::from(self.buffer_size.get()) / f64::from(self.context.sample_rate());
             self.js_buffer = self
