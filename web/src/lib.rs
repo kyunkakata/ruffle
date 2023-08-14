@@ -513,7 +513,7 @@ impl Ruffle {
             Registry::default().with(WASMLayer::new(
                 WASMLayerConfigBuilder::new()
                     .set_console_config(ConsoleConfig::ReportWithoutConsoleColor)
-                    .set_max_level(Level::TRACE)
+                    .set_max_level(config.log_level)
                     .build(),
             )),
         );

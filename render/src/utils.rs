@@ -159,7 +159,10 @@ fn validate_size(width: u16, height: u16) -> Result<(), Error> {
 /// The decoded bitmap will have pre-multiplied alpha.
 fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Error> {
     let jpeg_data = remove_invalid_jpeg_data(jpeg_data);
-    let options = DecoderOptions::default().jpeg_set_max_scans(4);
+    let options = DecoderOptions::new_fast()
+        .jpeg_set_max_scans(8)
+        .set_max_width(1500)
+        .set_max_height(1500);
     let mut decoder = JpegDecoder::new_with_options(options, &jpeg_data[..]);
     let result = decoder.decode();
     if result.is_err() {
@@ -319,10 +322,19 @@ pub fn decode_define_bits_lossless(swf_tag: &swf::DefineBitsLossless) -> Result<
 fn decode_png(data: &[u8]) -> Result<Bitmap, Error> {
     // Normalize output to 8-bit grayscale or RGB.
     // Ideally we'd want to normalize to 8-bit RGB only;
-    let options = DecoderOptions::default().png_set_add_alpha_channel(true);
+    let options = DecoderOptions::new_fast()
+        .png_set_confirm_crc(false)
+        .inflate_set_confirm_adler(false)
+        .set_max_width(1500)
+        .set_max_height(1500)
+        .png_set_add_alpha_channel(true);
     let mut decoder = JpegDecoder::new_with_options(options, data);
 
-    let decoder_data = decoder.decode().unwrap();
+    let _decoder_data = decoder.decode();
+    if _decoder_data.is_err() {
+        return old_decode_png(data);
+    }
+    let decoder_data = _decoder_data.unwrap();
     let info = decoder
         .info()
         .expect("info() should always return Some if read_info returned Ok");
@@ -333,6 +345,55 @@ fn decode_png(data: &[u8]) -> Result<Bitmap, Error> {
         BitmapFormat::Rgba,
         decoder_data,
     ))
+}
+
+/// Old Decodes the bitmap data in DefineBitsLossless tag into RGBA.
+/// DefineBitsLossless is Zlib encoded pixel data (similar to PNG), possibly
+/// palletized.
+fn old_decode_png(data: &[u8]) -> Result<Bitmap, Error> {
+    use png::{ColorType, Transformations};
+
+    let mut decoder = png::Decoder::new(data);
+    // Normalize output to 8-bit grayscale or RGB.
+    // Ideally we'd want to normalize to 8-bit RGB only, but seems like the `png` crate provides no such a feature.
+    decoder.set_transformations(Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info()?;
+
+    let mut data = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut data)?;
+
+    let (format, data) = match info.color_type {
+        ColorType::Rgb => (BitmapFormat::Rgb, data),
+        ColorType::Rgba => {
+            // In contrast to DefineBitsLossless tags, PNGs embedded in a DefineBitsJPEG tag will not have
+            // premultiplied alpha and need to be converted before sending to the renderer.
+            premultiply_alpha_rgba(&mut data);
+            (BitmapFormat::Rgba, data)
+        }
+        ColorType::Grayscale => (
+            BitmapFormat::Rgb,
+            data.into_iter().flat_map(|v| [v, v, v]).collect(),
+        ),
+        ColorType::GrayscaleAlpha => {
+            (
+                BitmapFormat::Rgba,
+                data.chunks_exact(2)
+                    .flat_map(|pixel| {
+                        // Pre-multiply alpha.
+                        let a = pixel[1];
+                        let v = (u16::from(pixel[0]) * u16::from(a) / 255) as u8;
+                        [v, v, v, a]
+                    })
+                    .collect(),
+            )
+        }
+        ColorType::Indexed => {
+            // Shouldn't get here because of `normalize_to_color8` transformation above.
+            unreachable!("Unexpected PNG ColorType::Indexed");
+        }
+    };
+
+    Ok(Bitmap::new(info.width, info.height, format, data))
 }
 
 /// Decodes the bitmap data in DefineBitsLossless tag into RGBA.
