@@ -34,7 +34,6 @@ use std::sync::Once;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{cell::RefCell, error::Error, num::NonZeroI32};
-use tracing::Level;
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::registry::Registry;
 use tracing_wasm::{ConsoleConfig, WASMLayer, WASMLayerConfigBuilder};
@@ -512,7 +511,7 @@ impl Ruffle {
         let log_subscriber = Arc::new(
             Registry::default().with(WASMLayer::new(
                 WASMLayerConfigBuilder::new()
-                    .set_console_config(ConsoleConfig::ReportWithoutConsoleColor)
+                    .set_report_logs_in_timings(cfg!(feature = "profiling"))
                     .set_max_level(config.log_level)
                     .build(),
             )),
@@ -657,6 +656,7 @@ impl Ruffle {
 
         // Register the instance and create the animation frame closure.
         let mut ruffle = Self::add_instance(instance)?;
+
         // Create the animation frame closure.
         ruffle.with_instance_mut(|instance| {
             instance.animation_handler = Some(Closure::new(move |timestamp| {
@@ -708,10 +708,8 @@ impl Ruffle {
             let mouse_leave_callback = Closure::new(move |_js_event: PointerEvent| {
                 let _ = ruffle.with_instance(move |instance| {
                     let _ = instance.with_core_mut(|core| {
-                        if !is_touch_device {
-                            core.set_mouse_in_stage(false);
-                            core.handle_event(PlayerEvent::MouseLeave);
-                        }
+                        core.set_mouse_in_stage(false);
+                        core.handle_event(PlayerEvent::MouseLeave);
                     });
                 });
             });
@@ -794,9 +792,7 @@ impl Ruffle {
                 let _ = ruffle.with_instance_mut(|instance| {
                     // If we actually clicked on the player, this will be reset to true
                     // after the event bubbles down to the player.
-                    if !is_touch_device {
-                        instance.has_focus = false;
-                    }
+                    instance.has_focus = false;
                 });
             });
 
@@ -817,7 +813,6 @@ impl Ruffle {
                             .unchecked_ref::<Element>()
                             .release_pointer_capture(js_event.pointer_id());
                     }
-
                     let event = PlayerEvent::MouseUp {
                         x: f64::from(js_event.offset_x()) * instance.device_pixel_ratio,
                         y: f64::from(js_event.offset_y()) * instance.device_pixel_ratio,
@@ -1025,7 +1020,7 @@ impl Ruffle {
                 let instances = instances.try_borrow()?;
                 if let Some(instance) = instances.get(self.0) {
                     let instance = instance.try_borrow()?;
-                    let _subscriber: tracing::subscriber::DefaultGuard =
+                    let _subscriber =
                         tracing::subscriber::set_default(instance.log_subscriber.clone());
                     Ok(f(&instance))
                 } else {
