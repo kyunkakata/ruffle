@@ -11,7 +11,7 @@ use crate::display_object::TDisplayObject;
 use crate::display_object::{DisplayObject, InteractiveObject, TInteractiveObject};
 use crate::events::KeyCode;
 use crate::string::AvmString;
-use gc_arena::{Collect, GcCell, GcWeakCell, MutationContext};
+use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
 
@@ -145,6 +145,35 @@ impl<'gc> EventObject<'gc> {
             .unwrap() // we don't expect to break here
     }
 
+    pub fn text_event<S>(
+        activation: &mut Activation<'_, 'gc>,
+        event_type: S,
+        text: AvmString<'gc>,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Object<'gc>
+    where
+        S: Into<AvmString<'gc>>,
+    {
+        let event_type: AvmString<'gc> = event_type.into();
+
+        let text_event_cls = activation.avm2().classes().textevent;
+        text_event_cls
+            .construct(
+                activation,
+                &[
+                    event_type.into(),
+                    // bubbles
+                    bubbles.into(),
+                    // cancelable
+                    cancelable.into(),
+                    // text
+                    text.into(),
+                ],
+            )
+            .unwrap() // we don't expect to break here
+    }
+
     pub fn net_status_event<S>(
         activation: &mut Activation<'_, 'gc>,
         event_type: S,
@@ -193,7 +222,7 @@ impl<'gc> TObject<'gc> for EventObject<'gc> {
         Ref::map(self.0.read(), |read| &read.base)
     }
 
-    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
         RefMut::map(self.0.write(mc), |write| &mut write.base)
     }
 
@@ -201,7 +230,7 @@ impl<'gc> TObject<'gc> for EventObject<'gc> {
         self.0.as_ptr() as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
+    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Value::Object((*self).into()))
     }
 
@@ -209,7 +238,7 @@ impl<'gc> TObject<'gc> for EventObject<'gc> {
         Some(Ref::map(self.0.read(), |d| &d.event))
     }
 
-    fn as_event_mut(&self, mc: MutationContext<'gc, '_>) -> Option<RefMut<Event<'gc>>> {
+    fn as_event_mut(&self, mc: &Mutation<'gc>) -> Option<RefMut<Event<'gc>>> {
         Some(RefMut::map(self.0.write(mc), |d| &mut d.event))
     }
 }

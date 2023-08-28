@@ -10,25 +10,56 @@ use crate::avm2::{
     Activation as Avm2Activation, Avm2, Error as Avm2Error, EventObject as Avm2EventObject,
     FlvValueAvm2Ext, Object as Avm2Object,
 };
+use crate::backend::audio::{
+    DecodeError, SoundInstanceHandle, SoundStreamInfo, SoundStreamWrapping,
+};
 use crate::backend::navigator::Request;
+use crate::buffer::{Buffer, Slice, Substream, SubstreamError};
 use crate::context::UpdateContext;
+use crate::display_object::MovieClip;
 use crate::loader::Error;
 use crate::string::AvmString;
 use crate::vminterface::AvmObject;
 use flv_rs::{
-    AudioData as FlvAudioData, Error as FlvError, FlvReader, Header as FlvHeader,
-    ScriptData as FlvScriptData, Tag as FlvTag, TagData as FlvTagData, Value as FlvValue,
-    VideoData as FlvVideoData, VideoPacket as FlvVideoPacket,
+    AudioData as FlvAudioData, AudioDataType as FlvAudioDataType, Error as FlvError, FlvReader,
+    Header as FlvHeader, ScriptData as FlvScriptData, SoundFormat as FlvSoundFormat,
+    SoundRate as FlvSoundRate, SoundSize as FlvSoundSize, SoundType as FlvSoundType, Tag as FlvTag,
+    TagData as FlvTagData, Value as FlvValue, VideoData as FlvVideoData,
+    VideoPacket as FlvVideoPacket,
 };
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, GcCell, Mutation};
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_video::frame::EncodedFrame;
 use ruffle_video::VideoStreamHandle;
 use std::cmp::max;
 use std::io::Seek;
-use std::sync::{Arc, Mutex};
-use swf::{VideoCodec, VideoDeblocking};
+use swf::{AudioCompression, SoundFormat, VideoCodec, VideoDeblocking};
+use thiserror::Error;
 use url::Url;
+
+#[derive(Debug, Error)]
+enum NetstreamError {
+    #[error("Decoding failed because {0}")]
+    DecodeError(DecodeError),
+
+    #[error("Substream management error {0}")]
+    SubstreamError(SubstreamError),
+
+    #[error("Unknown codec")]
+    UnknownCodec,
+}
+
+impl From<DecodeError> for NetstreamError {
+    fn from(err: DecodeError) -> NetstreamError {
+        NetstreamError::DecodeError(err)
+    }
+}
+
+impl From<SubstreamError> for NetstreamError {
+    fn from(err: SubstreamError) -> NetstreamError {
+        NetstreamError::SubstreamError(err)
+    }
+}
 
 /// Manager for all media streams.
 ///
@@ -135,7 +166,9 @@ pub enum NetStreamType {
     /// The stream is an FLV.
     Flv {
         header: FlvHeader,
-        stream: Option<VideoStreamHandle>,
+
+        /// The currently playing video track's stream instance.
+        video_stream: Option<VideoStreamHandle>,
 
         /// The index of the last processed frame.
         ///
@@ -150,11 +183,7 @@ pub enum NetStreamType {
 #[collect(no_drop)]
 pub struct NetStreamData<'gc> {
     /// All data currently loaded in the stream.
-    ///
-    /// NOTE: This is stored as an `Arc` to allow independent borrows of the
-    /// buffer data and stream state.
-    #[collect(require_static)]
-    buffer: Arc<Mutex<Vec<u8>>>,
+    buffer: Buffer,
 
     /// The buffer position that we are currently seeking to.
     offset: usize,
@@ -193,14 +222,28 @@ pub struct NetStreamData<'gc> {
 
     /// The URL of the requested FLV if one exists.
     url: Option<String>,
+
+    /// The `Substream` associated with the currently playing audio track and
+    /// the expected playback format of that audio.
+    #[collect(require_static)]
+    audio_stream: Option<(Substream, SoundStreamInfo)>,
+
+    /// The currently playing sound stream
+    #[collect(require_static)]
+    sound_instance: Option<SoundInstanceHandle>,
+
+    /// The MovieClip this `NetStream` is attached to.
+    attached_to: Option<MovieClip<'gc>>,
 }
 
 impl<'gc> NetStream<'gc> {
-    pub fn new(gc_context: MutationContext<'gc, '_>, avm_object: Option<AvmObject<'gc>>) -> Self {
+    pub fn new(gc_context: &Mutation<'gc>, avm_object: Option<AvmObject<'gc>>) -> Self {
+        // IMPORTANT: When adding new fields consider if they need to be
+        // initialized in `reset_buffer` as well.
         Self(GcCell::new(
             gc_context,
             NetStreamData {
-                buffer: Arc::new(Mutex::new(Vec::new())),
+                buffer: Buffer::new(),
                 offset: 0,
                 preload_offset: 0,
                 stream_type: None,
@@ -209,11 +252,14 @@ impl<'gc> NetStream<'gc> {
                 avm_object,
                 avm2_client: None,
                 url: None,
+                audio_stream: None,
+                sound_instance: None,
+                attached_to: None,
             },
         ))
     }
 
-    pub fn set_client(self, gc_context: MutationContext<'gc, '_>, new_client: Avm2Object<'gc>) {
+    pub fn set_client(self, gc_context: &Mutation<'gc>, new_client: Avm2Object<'gc>) {
         self.0.write(gc_context).avm2_client = Some(new_client);
     }
 
@@ -221,17 +267,50 @@ impl<'gc> NetStream<'gc> {
         self.0.read().avm2_client
     }
 
-    pub fn set_avm_object(self, gc_context: MutationContext<'gc, '_>, avm_object: AvmObject<'gc>) {
+    pub fn set_avm_object(self, gc_context: &Mutation<'gc>, avm_object: AvmObject<'gc>) {
         self.0.write(gc_context).avm_object = Some(avm_object);
     }
 
+    /// Reset the `NetStream` buffer to accept new source data.
+    ///
+    /// This must be done once per source change and should ideally be done
+    /// immediately before the first `load_buffer` call for a particular source
+    /// file.
+    ///
+    /// Externally visible AVM state must not be reinitialized here - i.e. the
+    /// AS3 `client` doesn't go away because you played a new video file.
+    pub fn reset_buffer(self, context: &mut UpdateContext<'_, 'gc>) {
+        let mut write = self.0.write(context.gc_context);
+
+        if let Some(instance) = write.sound_instance {
+            // We stop the sound twice because sounds may have either been
+            // played through the audio manager or through the backend directly
+            // depending on the attachment state at the time of first audio
+            // playback.
+            context.audio.stop_sound(instance);
+            context.audio_manager.stop_sound(context.audio, instance);
+        }
+
+        write.buffer = Buffer::new();
+        write.offset = 0;
+        write.preload_offset = 0;
+        write.stream_type = None;
+        write.stream_time = 0.0;
+        write.audio_stream = None;
+        write.sound_instance = None;
+    }
+
+    /// Append data to the `NetStream`'s current internal buffer.
+    ///
+    /// If you are loading data from a new source, you must first initialize
+    /// the buffer, otherwise existing buffer contents will remain and be
+    /// incorrectly parsed.
+    ///
+    /// Buffer loading can be done in chunks but must be done in such a way
+    /// that all data is appended in the correct order and that data from
+    /// separate streams is not mixed together.
     pub fn load_buffer(self, context: &mut UpdateContext<'_, 'gc>, data: &mut Vec<u8>) {
-        self.0
-            .write(context.gc_context)
-            .buffer
-            .lock()
-            .unwrap()
-            .append(data);
+        self.0.write(context.gc_context).buffer.append(data);
 
         // NOTE: The onMetaData event triggers before this event in Flash due to its streaming behavior.
         self.trigger_status_event(
@@ -245,11 +324,11 @@ impl<'gc> NetStream<'gc> {
     }
 
     pub fn bytes_loaded(self) -> usize {
-        self.0.read().buffer.lock().unwrap().len()
+        self.0.read().buffer.len()
     }
 
     pub fn bytes_total(self) -> usize {
-        self.0.read().buffer.lock().unwrap().len()
+        self.0.read().buffer.len()
     }
 
     /// Start playing media from this NetStream.
@@ -299,10 +378,432 @@ impl<'gc> NetStream<'gc> {
         StreamManager::toggle_paused(context, self);
     }
 
-    pub fn tick(self, context: &mut UpdateContext<'_, 'gc>, dt: f64) {
+    /// Indicates that this `NetStream`'s audio was detached from a `MovieClip` (AVM1)
+    pub fn was_detached(self, context: &mut UpdateContext<'_, 'gc>) {
         let mut write = self.0.write(context.gc_context);
-        let buffer_owned = write.buffer.clone();
-        let buffer = buffer_owned.lock().unwrap();
+
+        if let Some(sound_instance) = &write.sound_instance {
+            context
+                .audio_manager
+                .stop_sound(context.audio, *sound_instance);
+        }
+
+        write.audio_stream = None;
+        write.attached_to = None;
+    }
+
+    /// Indicates that this `NetStream`'s audio was attached to a `MovieClip` (AVM1)
+    pub fn was_attached(self, context: &mut UpdateContext<'_, 'gc>, clip: MovieClip<'gc>) {
+        let mut write = self.0.write(context.gc_context);
+
+        // A `NetStream` cannot be attached to two `MovieClip`s at once.
+        // Stop the old sound; the new one will stream at the next tag read.
+        // TODO: Change this to have `audio_manager` just switch the sound
+        // transforms around
+        if let Some(sound_instance) = &write.sound_instance {
+            context
+                .audio_manager
+                .stop_sound(context.audio, *sound_instance);
+        }
+
+        write.audio_stream = None;
+        write.attached_to = Some(clip);
+    }
+
+    /// Process a parsed FLV audio tag.
+    ///
+    /// `write` must be an active borrow of the current `NetStream`. `slice`
+    /// must reference the underlying backing buffer.
+    fn flv_audio_tag(
+        self,
+        write: &mut NetStreamData<'gc>,
+        slice: &Slice,
+        audio_data: FlvAudioData<'_>,
+    ) -> Result<(), NetstreamError> {
+        let data = match audio_data.data {
+            FlvAudioDataType::Raw(data)
+            | FlvAudioDataType::AacSequenceHeader(data)
+            | FlvAudioDataType::AacRaw(data) => slice.to_subslice(data),
+        };
+        let substream = match &mut write.audio_stream {
+            Some((substream, _sound_stream_info)) => {
+                if substream
+                    .last_chunk()
+                    .map(|lc| lc.end() > data.start())
+                    .unwrap_or(false)
+                {
+                    // Reject repeats of existing tags.
+                    // We need to do this because of lookahead - we will
+                    // encounter the same audio tag multiple times as we buffer
+                    // a few ahead for the audio backend.
+                    // This assumes that tags are processed in-order - which
+                    // should always be the case. Seeks should cancel the audio
+                    // stream before processing new tags.
+                    return Ok(());
+                }
+
+                substream
+            }
+            audio_stream => {
+                // None
+                let substream = Substream::new(slice.buffer().clone());
+                let swf_format = SoundFormat {
+                    compression: match audio_data.format {
+                        FlvSoundFormat::LinearPCMPlatformEndian => {
+                            AudioCompression::UncompressedUnknownEndian
+                        }
+                        FlvSoundFormat::Adpcm => AudioCompression::Adpcm,
+                        FlvSoundFormat::MP3 => AudioCompression::Mp3,
+                        FlvSoundFormat::LinearPCMLittleEndian => AudioCompression::Uncompressed,
+                        FlvSoundFormat::Nellymoser16kHz => AudioCompression::Nellymoser16Khz,
+                        FlvSoundFormat::Nellymoser8kHz => AudioCompression::Nellymoser8Khz,
+                        FlvSoundFormat::Nellymoser => AudioCompression::Nellymoser,
+                        FlvSoundFormat::G711ALawPCM => return Err(NetstreamError::UnknownCodec),
+                        FlvSoundFormat::G711MuLawPCM => return Err(NetstreamError::UnknownCodec),
+                        FlvSoundFormat::Aac => return Err(NetstreamError::UnknownCodec),
+                        FlvSoundFormat::Speex => AudioCompression::Speex,
+                        FlvSoundFormat::MP38kHz => AudioCompression::Mp3,
+                        FlvSoundFormat::DeviceSpecific => return Err(NetstreamError::UnknownCodec),
+                    },
+                    sample_rate: match (audio_data.format, audio_data.rate) {
+                        (FlvSoundFormat::MP38kHz, _) => 8_000,
+                        (_, FlvSoundRate::R5_500) => 5_500,
+                        (_, FlvSoundRate::R11_000) => 11_000,
+                        (_, FlvSoundRate::R22_000) => 22_000,
+                        (_, FlvSoundRate::R44_000) => 44_000,
+                    },
+                    is_stereo: match audio_data.sound_type {
+                        FlvSoundType::Mono => false,
+                        FlvSoundType::Stereo => true,
+                    },
+                    is_16_bit: match audio_data.size {
+                        FlvSoundSize::Bits8 => false,
+                        FlvSoundSize::Bits16 => true,
+                    },
+                };
+
+                let sound_stream_head = SoundStreamInfo {
+                    wrapping: SoundStreamWrapping::Unwrapped,
+                    stream_format: swf_format,
+                    num_samples_per_block: 0,
+                    latency_seek: 0,
+                };
+
+                *audio_stream = Some((substream, sound_stream_head));
+
+                &mut audio_stream.as_mut().unwrap().0
+            }
+        };
+
+        Ok(substream.append(data)?)
+    }
+
+    /// Determine if the given sound is currently playing.
+    fn sound_currently_playing(
+        context: &mut UpdateContext<'_, 'gc>,
+        sound: &Option<SoundInstanceHandle>,
+    ) -> bool {
+        sound
+            .map(|si| context.audio.is_sound_playing(si))
+            .unwrap_or(false)
+    }
+
+    /// Clean up after a sound instance that has finished playing.
+    ///
+    /// Generally speaking, streams are only to be used once. However, the
+    /// audio backend will only retain information about sounds that are
+    /// currently playing, so if the sound has finished since the last tick, we
+    /// need to restart it.
+    ///
+    /// Intended to be called at the start of tag processing, before any new
+    /// audio data has been streamed.
+    fn cleanup_sound_stream(
+        self,
+        context: &mut UpdateContext<'_, 'gc>,
+        write: &mut NetStreamData<'gc>,
+    ) {
+        if !Self::sound_currently_playing(context, &write.sound_instance) {
+            write.audio_stream = None;
+            write.sound_instance = None;
+        }
+    }
+
+    /// Ensure that if we have queued up audio into a sound stream, that said
+    /// stream gets sent over to the audio backend.
+    ///
+    /// Intended to be called at the end of tag processing. Audio processing
+    /// should occur only after a minimum number of tags have been processed to
+    /// avoid audio underruns.
+    fn commit_sound_stream(
+        self,
+        context: &mut UpdateContext<'_, 'gc>,
+        write: &mut NetStreamData<'gc>,
+    ) -> Result<(), NetstreamError> {
+        if !Self::sound_currently_playing(context, &write.sound_instance) {
+            if let Some((substream, sound_stream_head)) = &mut write.audio_stream {
+                let attached_to = write.attached_to;
+
+                if let Some(mc) = attached_to {
+                    write.sound_instance = Some(context.audio_manager.start_substream(
+                        context.audio,
+                        substream.clone(),
+                        mc,
+                        sound_stream_head,
+                    )?);
+                } else {
+                    write.sound_instance = Some(
+                        context
+                            .audio
+                            .start_substream(substream.clone(), sound_stream_head)?,
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process a parsed FLV video tag.
+    ///
+    /// `write` must be an active borrow of the current `NetStream`. `slice`
+    /// must reference the underlying backing buffer.
+    ///
+    /// `tag_needs_preloading` indicates that this video tag has not been
+    /// encountered before.
+    fn flv_video_tag(
+        self,
+        context: &mut UpdateContext<'_, 'gc>,
+        write: &mut NetStreamData<'gc>,
+        slice: &Slice,
+        video_data: FlvVideoData<'_>,
+        tag_needs_preloading: bool,
+    ) {
+        let (video_handle, frame_id) = match write.stream_type {
+            Some(NetStreamType::Flv {
+                video_stream,
+                frame_id,
+                ..
+            }) => (video_stream, frame_id),
+            _ => unreachable!(),
+        };
+        let codec = VideoCodec::from_u8(video_data.codec_id as u8);
+        let buffer = slice.data();
+
+        match (video_handle, codec, video_data.data) {
+            (maybe_video_handle, Some(codec), FlvVideoPacket::Data(mut data))
+            | (
+                maybe_video_handle,
+                Some(codec),
+                FlvVideoPacket::Vp6Data {
+                    hadjust: _,
+                    vadjust: _,
+                    mut data,
+                },
+            ) => {
+                //Some movies don't actually have metadata, so let's register a
+                //dummy stream just in case. All the actual data in the registration
+                //is lies, of course.
+                let video_handle = match maybe_video_handle {
+                    Some(stream) => stream,
+                    None => {
+                        match context.video.register_video_stream(
+                            1,
+                            (8, 8),
+                            codec,
+                            VideoDeblocking::UseVideoPacketValue,
+                        ) {
+                            Ok(new_handle) => {
+                                match &mut write.stream_type {
+                                    Some(NetStreamType::Flv { video_stream, .. }) => {
+                                        *video_stream = Some(new_handle)
+                                    }
+                                    _ => unreachable!(),
+                                }
+
+                                new_handle
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Got error when registring FLV video stream: {}",
+                                    e
+                                );
+                                return; //TODO: This originally breaks and halts tag processing
+                            }
+                        }
+                    }
+                };
+
+                if codec == VideoCodec::ScreenVideo || codec == VideoCodec::ScreenVideoV2 {
+                    // ScreenVideo streams consider the FLV
+                    // video data byte to be integral to their
+                    // own bitstream.
+                    let offset = data.as_ptr() as usize - buffer.as_ptr() as usize;
+                    let len = data.len();
+                    data = buffer
+                        .get(offset - 1..offset + len)
+                        .expect("screenvideo flvs have video data bytes");
+                }
+
+                // NOTE: Currently, no implementation of the decoder backend actually requires
+                if tag_needs_preloading {
+                    let encoded_frame = EncodedFrame {
+                        codec,
+                        data, //TODO: ScreenVideo's decoder wants the FLV header bytes
+                        frame_id,
+                    };
+
+                    if let Err(e) = context
+                        .video
+                        .preload_video_stream_frame(video_handle, encoded_frame)
+                    {
+                        tracing::error!("Preloading video frame {} failed: {}", frame_id, e);
+                    }
+                }
+
+                let encoded_frame = EncodedFrame {
+                    codec,
+                    data, //TODO: ScreenVideo's decoder wants the FLV header bytes
+                    frame_id,
+                };
+
+                match context.video.decode_video_stream_frame(
+                    video_handle,
+                    encoded_frame,
+                    context.renderer,
+                ) {
+                    Ok(bitmap_info) => {
+                        write.last_decoded_bitmap = Some(bitmap_info);
+                    }
+                    Err(e) => {
+                        tracing::error!("Decoding video frame {} failed: {}", frame_id, e);
+                    }
+                }
+            }
+            (_, _, FlvVideoPacket::CommandFrame(_command)) => {
+                tracing::warn!("Stub: FLV command frame processing")
+            }
+            (_, _, FlvVideoPacket::AvcSequenceHeader(_data)) => {
+                tracing::warn!("Stub: FLV AVC/H.264 Sequence Header processing")
+            }
+            (_, _, FlvVideoPacket::AvcNalu { .. }) => {
+                tracing::warn!("Stub: FLV AVC/H.264 NALU processing")
+            }
+            (_, _, FlvVideoPacket::AvcEndOfSequence) => {
+                tracing::warn!("Stub: FLV AVC/H.264 End of Sequence processing")
+            }
+            (_, None, _) => {
+                tracing::error!(
+                    "FLV video tag has invalid codec id {}",
+                    video_data.codec_id as u8
+                )
+            }
+        }
+
+        match &mut write.stream_type {
+            Some(NetStreamType::Flv {
+                ref mut frame_id, ..
+            }) => *frame_id += 1,
+            _ => unreachable!(),
+        };
+    }
+
+    /// Process a parsed FLV script tag.
+    ///
+    /// This function attempts to borrow the current `NetStream`, you must drop
+    /// any existing borrows and pick them back up when you're done.
+    ///
+    /// `tag_needs_preloading` indicates that this script tag has not been
+    /// encountered before.
+    fn flv_script_tag(
+        self,
+        context: &mut UpdateContext<'_, 'gc>,
+        script_data: FlvScriptData<'_>,
+        tag_needs_preloading: bool,
+    ) {
+        let mut write = self.0.write(context.gc_context);
+        let has_stream_already = match write.stream_type {
+            Some(NetStreamType::Flv { video_stream, .. }) => video_stream.is_some(),
+            _ => unreachable!(),
+        };
+
+        let mut width = None;
+        let mut height = None;
+        let mut video_codec_id = None;
+        let mut frame_rate = None;
+        let mut duration = None;
+
+        for var in script_data.0 {
+            if var.name == b"onMetaData" && !has_stream_already {
+                match var.data.clone() {
+                    FlvValue::Object(subvars)
+                    | FlvValue::EcmaArray(subvars)
+                    | FlvValue::StrictArray(subvars) => {
+                        for subvar in subvars {
+                            match (subvar.name, subvar.data) {
+                                (b"width", FlvValue::Number(val)) => width = Some(val),
+                                (b"height", FlvValue::Number(val)) => height = Some(val),
+                                (b"videocodecid", FlvValue::Number(val)) => {
+                                    video_codec_id = Some(val)
+                                }
+                                (b"framerate", FlvValue::Number(val)) => frame_rate = Some(val),
+                                (b"duration", FlvValue::Number(val)) => duration = Some(val),
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => tracing::error!("Invalid FLV metadata tag!"),
+                }
+            }
+            let avm_object = write.avm_object;
+            drop(write);
+            // This is necessary because the script callback functions can call back into
+            // these methods, (e.g. NetStream::play), so we need to avoid holding a borrow
+            // while the script data is being handled.
+            let _ = self.handle_script_data(avm_object, context, var.name, var.data); // Any errors while trying to lookup or call AVM2 properties are silently swallowed.
+            write = self.0.write(context.gc_context);
+        }
+
+        if tag_needs_preloading {
+            if let (
+                Some(width),
+                Some(height),
+                Some(video_codec_id),
+                Some(frame_rate),
+                Some(duration),
+            ) = (width, height, video_codec_id, frame_rate, duration)
+            {
+                let num_frames = frame_rate * duration;
+                if let Some(video_codec) = VideoCodec::from_u8(video_codec_id as u8) {
+                    match context.video.register_video_stream(
+                        num_frames as u32,
+                        (width as u16, height as u16),
+                        video_codec,
+                        VideoDeblocking::UseVideoPacketValue,
+                    ) {
+                        Ok(stream_handle) => match &mut write.stream_type {
+                            Some(NetStreamType::Flv { video_stream, .. }) => {
+                                *video_stream = Some(stream_handle)
+                            }
+                            _ => unreachable!(),
+                        },
+                        Err(e) => {
+                            tracing::error!("Got error when registring FLV video stream: {}", e)
+                        }
+                    }
+                } else {
+                    tracing::error!("FLV video stream has invalid codec ID {}", video_codec_id);
+                }
+            }
+        }
+    }
+
+    pub fn tick(self, context: &mut UpdateContext<'_, 'gc>, dt: f64) {
+        #![allow(clippy::explicit_auto_deref)] //Erroneous lint
+        let mut write = self.0.write(context.gc_context);
+
+        self.cleanup_sound_stream(context, &mut write);
+        let slice = write.buffer.to_full_slice();
+        let buffer = slice.data();
 
         // First, try to sniff the stream's container format from headers.
         if write.stream_type.is_none() {
@@ -315,14 +816,14 @@ impl<'gc> NetStream<'gc> {
 
             match buffer.get(0..3) {
                 Some([0x46, 0x4C, 0x56]) => {
-                    let mut reader = FlvReader::from_parts(&buffer, write.offset);
+                    let mut reader = FlvReader::from_parts(&*buffer, write.offset);
                     match FlvHeader::parse(&mut reader) {
                         Ok(header) => {
                             write.offset = reader.into_parts().1;
                             write.preload_offset = write.offset;
                             write.stream_type = Some(NetStreamType::Flv {
                                 header,
-                                stream: None,
+                                video_stream: None,
                                 frame_id: 0,
                             });
                         }
@@ -366,18 +867,24 @@ impl<'gc> NetStream<'gc> {
         let end_time = write.stream_time + dt;
         let mut end_of_video = false;
         let mut error = false;
+        let mut max_lookahead_audio_tags = 5;
+        let mut is_lookahead_tag = false;
 
         //At this point we should know our stream type.
         if matches!(write.stream_type, Some(NetStreamType::Flv { .. })) {
-            let mut reader = FlvReader::from_parts(&buffer, write.offset);
+            let mut reader = FlvReader::from_parts(&*buffer, write.offset);
 
             loop {
                 let tag = FlvTag::parse(&mut reader);
                 if let Err(e) = tag {
-                    if matches!(e, FlvError::EndOfData) {
+                    // `is_lookahead_tag` gets set once we start reading tags
+                    // after the end & won't ever be set back. We don't want
+                    // error states or playback ending to trip until we run
+                    // those tags "for realsies"
+                    if !is_lookahead_tag && matches!(e, FlvError::EndOfData) {
                         //TODO: Check expected total length for streaming / progressive download
                         end_of_video = true;
-                    } else {
+                    } else if !is_lookahead_tag {
                         //Corrupt tag or out of data
                         tracing::error!("FLV tag parsing failed: {}", e);
                         error = true;
@@ -387,12 +894,8 @@ impl<'gc> NetStream<'gc> {
                 }
 
                 let tag = tag.expect("valid tag");
-                if tag.timestamp as f64 >= end_time {
-                    //All tags processed
-                    if let Err(e) = FlvTag::skip_back(&mut reader) {
-                        tracing::error!("FLV skip back failed: {}", e);
-                    }
-
+                is_lookahead_tag = tag.timestamp as f64 >= end_time;
+                if is_lookahead_tag && max_lookahead_audio_tags == 0 {
                     break;
                 }
 
@@ -401,259 +904,49 @@ impl<'gc> NetStream<'gc> {
                     >= write.preload_offset;
 
                 match tag.data {
-                    FlvTagData::Audio(FlvAudioData { .. }) => {
-                        tracing::warn!("Stub: Stream audio processing");
+                    FlvTagData::Audio(audio_data) => {
+                        if is_lookahead_tag {
+                            max_lookahead_audio_tags -= 1;
+                        }
+
+                        if let Err(e) = self.flv_audio_tag(&mut write, &slice, audio_data) {
+                            //TODO: Fire an error event at AS.
+                            tracing::error!("Error committing sound stream: {}", e);
+                        }
                     }
-                    FlvTagData::Video(FlvVideoData { codec_id, data, .. }) => {
-                        let (video_handle, frame_id) = match write.stream_type {
-                            Some(NetStreamType::Flv {
-                                stream, frame_id, ..
-                            }) => (stream, frame_id),
-                            _ => unreachable!(),
-                        };
-                        let codec = VideoCodec::from_u8(codec_id as u8);
-
-                        match (video_handle, codec, data) {
-                            (maybe_video_handle, Some(codec), FlvVideoPacket::Data(mut data))
-                            | (
-                                maybe_video_handle,
-                                Some(codec),
-                                FlvVideoPacket::Vp6Data {
-                                    hadjust: _,
-                                    vadjust: _,
-                                    mut data,
-                                },
-                            ) => {
-                                //Some movies don't actually have metadata, so let's register a
-                                //dummy stream just in case. All the actual data in the registration
-                                //is lies, of course.
-                                let video_handle = match maybe_video_handle {
-                                    Some(stream) => stream,
-                                    None => {
-                                        match context.video.register_video_stream(
-                                            1,
-                                            (8, 8),
-                                            codec,
-                                            VideoDeblocking::UseVideoPacketValue,
-                                        ) {
-                                            Ok(new_handle) => {
-                                                match &mut write.stream_type {
-                                                    Some(NetStreamType::Flv { stream, .. }) => {
-                                                        *stream = Some(new_handle)
-                                                    }
-                                                    _ => unreachable!(),
-                                                }
-
-                                                new_handle
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Got error when registring FLV video stream: {}",
-                                                    e
-                                                );
-                                                break;
-                                            }
-                                        }
-                                    }
-                                };
-
-                                if codec == VideoCodec::ScreenVideo
-                                    || codec == VideoCodec::ScreenVideoV2
-                                {
-                                    // ScreenVideo streams consider the FLV
-                                    // video data byte to be integral to their
-                                    // own bitstream.
-                                    let offset = data.as_ptr() as usize - buffer.as_ptr() as usize;
-                                    let len = data.len();
-                                    data = &buffer[offset - 1..offset + len];
-                                }
-
-                                // NOTE: Currently, no implementation of the decoder backend actually requires
-                                if tag_needs_preloading {
-                                    let encoded_frame = EncodedFrame {
-                                        codec,
-                                        data, //TODO: ScreenVideo's decoder wants the FLV header bytes
-                                        frame_id,
-                                    };
-
-                                    if let Err(e) = context
-                                        .video
-                                        .preload_video_stream_frame(video_handle, encoded_frame)
-                                    {
-                                        tracing::error!(
-                                            "Preloading video frame {} failed: {}",
-                                            frame_id,
-                                            e
-                                        );
-                                    }
-                                }
-
-                                let encoded_frame = EncodedFrame {
-                                    codec,
-                                    data, //TODO: ScreenVideo's decoder wants the FLV header bytes
-                                    frame_id,
-                                };
-
-                                match context.video.decode_video_stream_frame(
-                                    video_handle,
-                                    encoded_frame,
-                                    context.renderer,
-                                ) {
-                                    Ok(bitmap_info) => {
-                                        let (_, position) = reader.into_parts();
-                                        write.last_decoded_bitmap = Some(bitmap_info);
-                                        reader = FlvReader::from_parts(&buffer, position);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Decoding video frame {} failed: {}",
-                                            frame_id,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            (_, _, FlvVideoPacket::CommandFrame(_command)) => {
-                                tracing::warn!("Stub: FLV command frame processing")
-                            }
-                            (_, _, FlvVideoPacket::AvcSequenceHeader(_data)) => {
-                                tracing::warn!("Stub: FLV AVC/H.264 Sequence Header processing")
-                            }
-                            (_, _, FlvVideoPacket::AvcNalu { .. }) => {
-                                tracing::warn!("Stub: FLV AVC/H.264 NALU processing")
-                            }
-                            (_, _, FlvVideoPacket::AvcEndOfSequence) => {
-                                tracing::warn!("Stub: FLV AVC/H.264 End of Sequence processing")
-                            }
-                            (_, None, _) => {
-                                tracing::error!(
-                                    "FLV video tag has invalid codec id {}",
-                                    codec_id as u8
-                                )
-                            }
-                        }
-
-                        let (_, position) = reader.into_parts();
-                        match &mut write.stream_type {
-                            Some(NetStreamType::Flv {
-                                ref mut frame_id, ..
-                            }) => *frame_id += 1,
-                            _ => unreachable!(),
-                        };
-                        reader = FlvReader::from_parts(&buffer, position);
-                    }
-                    FlvTagData::Script(FlvScriptData(vars)) => {
-                        let has_stream_already = match write.stream_type {
-                            Some(NetStreamType::Flv { stream, .. }) => stream.is_some(),
-                            _ => unreachable!(),
-                        };
-
-                        let mut width = None;
-                        let mut height = None;
-                        let mut video_codec_id = None;
-                        let mut frame_rate = None;
-                        let mut duration = None;
-
-                        for var in vars {
-                            if var.name == b"onMetaData" && !has_stream_already {
-                                match var.data.clone() {
-                                    FlvValue::Object(subvars)
-                                    | FlvValue::EcmaArray(subvars)
-                                    | FlvValue::StrictArray(subvars) => {
-                                        for subvar in subvars {
-                                            match (subvar.name, subvar.data) {
-                                                (b"width", FlvValue::Number(val)) => {
-                                                    width = Some(val)
-                                                }
-                                                (b"height", FlvValue::Number(val)) => {
-                                                    height = Some(val)
-                                                }
-                                                (b"videocodecid", FlvValue::Number(val)) => {
-                                                    video_codec_id = Some(val)
-                                                }
-                                                (b"framerate", FlvValue::Number(val)) => {
-                                                    frame_rate = Some(val)
-                                                }
-                                                (b"duration", FlvValue::Number(val)) => {
-                                                    duration = Some(val)
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                    _ => tracing::error!("Invalid FLV metadata tag!"),
-                                }
-                            }
-                            drop(write);
-                            // This is necessary because the script callback functions can call back into
-                            // these methods, (e.g. NetStream::play), so we need to avoid holding a borrow
-                            // while the script data is being handled.
-                            let _ = self.handle_script_data(
-                                self.0.read().avm_object,
-                                context,
-                                var.name,
-                                var.data,
-                            ); // Any errors while trying to lookup or call AVM2 properties are silently swallowed.
-                            write = self.0.write(context.gc_context);
-                        }
-
-                        let (_, position) = reader.into_parts();
-
-                        if tag_needs_preloading {
-                            if let (
-                                Some(width),
-                                Some(height),
-                                Some(video_codec_id),
-                                Some(frame_rate),
-                                Some(duration),
-                            ) = (width, height, video_codec_id, frame_rate, duration)
-                            {
-                                let num_frames = frame_rate * duration;
-                                if let Some(video_codec) = VideoCodec::from_u8(video_codec_id as u8)
-                                {
-                                    match context.video.register_video_stream(
-                                        num_frames as u32,
-                                        (width as u16, height as u16),
-                                        video_codec,
-                                        VideoDeblocking::UseVideoPacketValue,
-                                    ) {
-                                        Ok(stream_handle) => match &mut write.stream_type {
-                                            Some(NetStreamType::Flv { stream, .. }) => {
-                                                *stream = Some(stream_handle)
-                                            }
-                                            _ => unreachable!(),
-                                        },
-                                        Err(e) => tracing::error!(
-                                            "Got error when registring FLV video stream: {}",
-                                            e
-                                        ),
-                                    }
-                                } else {
-                                    tracing::error!(
-                                        "FLV video stream has invalid codec ID {}",
-                                        video_codec_id
-                                    );
-                                }
-                            }
-                        }
-
-                        reader = FlvReader::from_parts(&buffer, position);
+                    FlvTagData::Video(video_data) if !is_lookahead_tag => self.flv_video_tag(
+                        context,
+                        &mut write,
+                        &slice,
+                        video_data,
+                        tag_needs_preloading,
+                    ),
+                    FlvTagData::Script(script_data) if !is_lookahead_tag => {
+                        drop(write);
+                        self.flv_script_tag(context, script_data, tag_needs_preloading);
+                        write = self.0.write(context.gc_context);
                     }
                     FlvTagData::Invalid(e) => {
                         tracing::error!("FLV data parsing failed: {}", e)
                     }
+                    FlvTagData::Video(_) | FlvTagData::Script(_) => {}
                 }
 
-                // We cannot mutate stream state while also holding an active
-                // reader or any tags.
-                let (_, position) = reader.into_parts();
-                write.offset = position;
-                write.preload_offset = max(write.offset, write.preload_offset);
-                reader = FlvReader::from_parts(&buffer, position);
+                if !is_lookahead_tag {
+                    write.offset = reader
+                        .stream_position()
+                        .expect("FLV reader stream position")
+                        as usize;
+                    write.preload_offset = max(write.offset, write.preload_offset);
+                }
             }
         }
 
         write.stream_time = end_time;
+        if let Err(e) = self.commit_sound_stream(context, &mut write) {
+            //TODO: Fire an error event at AS.
+            tracing::error!("Error committing sound stream: {}", e);
+        }
         drop(write);
 
         if end_of_video {

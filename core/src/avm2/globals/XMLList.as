@@ -21,10 +21,20 @@ package {
         AS3 native function text():XMLList;
         AS3 native function toXMLString():String;
         AS3 native function toString():String;
+        AS3 native function comments():XMLList;
+        AS3 native function processingInstructions(name:String = "*"):XMLList;
 
         // The following native methods are not declared in the documentation,
         // but still exist
         AS3 native function name(): Object;
+
+        AS3 function toJSON(k:String) : * {
+            return this.toJSON(k);
+        }
+
+        AS3 function valueOf():XMLList {
+            return this;
+        }
 
         prototype.hasComplexContent = function():Boolean {
             var self:XMLList = this;
@@ -93,6 +103,20 @@ package {
         prototype.text = function():XMLList {
             var self:XMLList = this;
             return self.AS3::text();
+        }
+
+        prototype.comments = function():XMLList {
+            var self:XML = this;
+            return self.AS3::comments();
+        }
+
+        prototype.toJSON = function(k:String):* {
+            return "XMLList";
+        };
+
+        prototype.processingInstructions = function(name:String = "*"):XMLList {
+            var self:XML = this;
+            return self.AS3::processingInstructions(name);
         }
 
         public static const length:int = 1;

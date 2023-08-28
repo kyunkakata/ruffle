@@ -3,6 +3,9 @@ use enum_map::Enum;
 use smallvec::SmallVec;
 use swf::{CharacterId, FillStyle, LineStyle, Rectangle, Shape, ShapeRecord, Twips};
 
+/// Controls the accuracy of the approximated quadratic curve, when splitting up a cubic curve
+const CUBIC_CURVE_TOLERANCE: f64 = 0.01;
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum FillRule {
     EvenOdd,
@@ -119,8 +122,13 @@ impl<'a> From<&'a swf::Shape> for DistilledShape<'a> {
 pub enum DrawCommand {
     MoveTo(swf::Point<Twips>),
     LineTo(swf::Point<Twips>),
-    CurveTo {
+    QuadraticCurveTo {
         control: swf::Point<Twips>,
+        anchor: swf::Point<Twips>,
+    },
+    CubicCurveTo {
+        control_a: swf::Point<Twips>,
+        control_b: swf::Point<Twips>,
         anchor: swf::Point<Twips>,
     },
 }
@@ -130,7 +138,8 @@ impl DrawCommand {
         match self {
             DrawCommand::MoveTo(point)
             | DrawCommand::LineTo(point)
-            | DrawCommand::CurveTo { anchor: point, .. } => *point,
+            | DrawCommand::QuadraticCurveTo { anchor: point, .. }
+            | DrawCommand::CubicCurveTo { anchor: point, .. } => *point,
         }
     }
 }
@@ -224,7 +233,7 @@ impl PathSegment {
                     },
                 ) => {
                     let end = i.next().expect("Bezier without endpoint");
-                    Some(DrawCommand::CurveTo {
+                    Some(DrawCommand::QuadraticCurveTo {
                         control: (*point).into(),
                         anchor: (*end).into(),
                     })
@@ -676,8 +685,32 @@ pub fn draw_command_fill_hit_test(commands: &[DrawCommand], test_point: swf::Poi
                 winding += winding_number_line(test_point, cursor, *line_to);
                 cursor = *line_to;
             }
-            DrawCommand::CurveTo { control, anchor } => {
+            DrawCommand::QuadraticCurveTo { control, anchor } => {
                 winding += winding_number_curve(test_point, cursor, *control, *anchor);
+                cursor = *anchor;
+            }
+            DrawCommand::CubicCurveTo {
+                control_a,
+                control_b,
+                anchor,
+            } => {
+                lyon_geom::CubicBezierSegment {
+                    from: lyon_geom::Point::new(cursor.x.to_pixels(), cursor.y.to_pixels()),
+                    ctrl1: lyon_geom::Point::new(control_a.x.to_pixels(), control_a.y.to_pixels()),
+                    ctrl2: lyon_geom::Point::new(control_b.x.to_pixels(), control_b.y.to_pixels()),
+                    to: lyon_geom::Point::new(anchor.x.to_pixels(), anchor.y.to_pixels()),
+                }
+                .for_each_quadratic_bezier(
+                    CUBIC_CURVE_TOLERANCE,
+                    &mut |quadratic_curve| {
+                        winding += winding_number_curve(
+                            test_point,
+                            swf::Point::from_pixels(quadratic_curve.from.x, quadratic_curve.from.y),
+                            swf::Point::from_pixels(quadratic_curve.ctrl.x, quadratic_curve.ctrl.y),
+                            swf::Point::from_pixels(quadratic_curve.to.x, quadratic_curve.to.y),
+                        );
+                    },
+                );
                 cursor = *anchor;
             }
         }
@@ -713,11 +746,51 @@ pub fn draw_command_stroke_hit_test(
                 }
                 cursor = *line_to;
             }
-            DrawCommand::CurveTo { control, anchor } => {
+            DrawCommand::QuadraticCurveTo { control, anchor } => {
                 if hit_test_stroke_curve(test_point, cursor, *control, *anchor, stroke_widths) {
                     return true;
                 }
                 cursor = *anchor;
+            }
+            DrawCommand::CubicCurveTo {
+                control_a,
+                control_b,
+                anchor,
+            } => {
+                let mut hit = false;
+                lyon_geom::CubicBezierSegment {
+                    from: lyon_geom::Point::new(cursor.x.to_pixels(), cursor.y.to_pixels()),
+                    ctrl1: lyon_geom::Point::new(control_a.x.to_pixels(), control_a.y.to_pixels()),
+                    ctrl2: lyon_geom::Point::new(control_b.x.to_pixels(), control_b.y.to_pixels()),
+                    to: lyon_geom::Point::new(anchor.x.to_pixels(), anchor.y.to_pixels()),
+                }
+                .for_each_quadratic_bezier(
+                    CUBIC_CURVE_TOLERANCE,
+                    &mut |quadratic_curve| {
+                        if !hit
+                            && hit_test_stroke_curve(
+                                test_point,
+                                swf::Point::from_pixels(
+                                    quadratic_curve.from.x,
+                                    quadratic_curve.from.y,
+                                ),
+                                swf::Point::from_pixels(
+                                    quadratic_curve.ctrl.x,
+                                    quadratic_curve.ctrl.y,
+                                ),
+                                swf::Point::from_pixels(quadratic_curve.to.x, quadratic_curve.to.y),
+                                stroke_widths,
+                            )
+                        {
+                            hit = true;
+                        }
+                    },
+                );
+                cursor = *anchor;
+
+                if hit {
+                    return true;
+                }
             }
         }
     }
@@ -1220,6 +1293,31 @@ pub fn quadratic_curve_bounds(
             Twips::from_pixels(max_x) + radius,
             Twips::from_pixels(max_y) + radius,
         ))
+}
+
+pub fn cubic_curve_bounds(
+    start: swf::Point<Twips>,
+    stroke_width: Twips,
+    control_a: swf::Point<Twips>,
+    control_b: swf::Point<Twips>,
+    anchor: swf::Point<Twips>,
+) -> Rectangle<Twips> {
+    // [NA] Should we just move most of our math in this file to lyon_geom?
+    let bounds = lyon_geom::CubicBezierSegment {
+        from: lyon_geom::Point::new(start.x.to_pixels(), start.y.to_pixels()),
+        ctrl1: lyon_geom::Point::new(control_a.x.to_pixels(), control_a.y.to_pixels()),
+        ctrl2: lyon_geom::Point::new(control_b.x.to_pixels(), control_b.y.to_pixels()),
+        to: lyon_geom::Point::new(anchor.x.to_pixels(), anchor.y.to_pixels()),
+    }
+    .bounding_box();
+
+    let radius = stroke_width / 2;
+    Rectangle {
+        x_min: Twips::from_pixels(bounds.min.x) - radius,
+        x_max: Twips::from_pixels(bounds.max.x) + radius,
+        y_min: Twips::from_pixels(bounds.min.y) - radius,
+        y_max: Twips::from_pixels(bounds.max.y) + radius,
+    }
 }
 
 #[cfg(test)]

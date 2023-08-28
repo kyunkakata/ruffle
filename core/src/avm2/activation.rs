@@ -400,12 +400,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             RegisterSet::new(num_locals + num_declared_arguments + arg_register + 1);
         *local_registers.get_mut(0).unwrap() = this.into();
 
-        let activation_class = if let Some(class_cache) = method.activation_class {
-            let cached_cls = class_cache.read();
-            let activation_class = if let Some(cls) = *cached_cls {
-                cls
-            } else {
-                drop(cached_cls);
+        let activation_class =
+            BytecodeMethod::get_or_init_activation_class(method, context.gc_context, || {
                 let translation_unit = method.translation_unit();
                 let abc_method = method.method();
                 let mut dummy_activation =
@@ -417,18 +413,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                     abc_method,
                     body,
                 )?;
-                let activation_class_object =
-                    ClassObject::from_class(&mut dummy_activation, activation_class, None)?;
-                drop(dummy_activation);
-
-                *class_cache.write(context.gc_context) = Some(activation_class_object);
-                activation_class_object
-            };
-
-            Some(activation_class)
-        } else {
-            None
-        };
+                ClassObject::from_class(&mut dummy_activation, activation_class, None)
+            })?;
 
         let mut activation = Self {
             actions_since_timeout_check: 0,
@@ -1252,7 +1238,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn op_call(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
         let args = self.pop_stack_args(arg_count);
         let receiver = self.pop_stack();
-        let function = self.pop_stack().as_callable(self, None, Some(receiver))?;
+        let function = self
+            .pop_stack()
+            .as_callable(self, None, Some(receiver), false)?;
         let value = function.call(receiver, &args, self)?;
 
         self.push_stack(value);
@@ -1277,7 +1265,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         #[allow(unreachable_code)]
         {
             let args = self.pop_stack_args(arg_count);
-            let receiver = self.pop_stack().as_callable(self, None, None)?;
+            let receiver = self.pop_stack().as_callable(self, None, None, false)?;
 
             let value = receiver.call_method(index.0, &args, self)?;
 
@@ -1321,6 +1309,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             self,
             Some(&multiname),
             Some(receiver.into()),
+            false,
         )?;
         let value = function.call(Value::Null, &args, self)?;
 
@@ -1858,7 +1847,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_construct(&mut self, arg_count: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
         let args = self.pop_stack_args(arg_count);
-        let ctor = self.pop_stack().as_callable(self, None, None)?;
+        let ctor = self.pop_stack().as_callable(self, None, None, true)?;
 
         let object = ctor.construct(self, &args)?;
 
@@ -2805,15 +2794,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_is_type_late(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let type_object = self
+        let Some(type_object) = self
             .pop_stack()
             .as_object()
             .and_then(|o| o.as_class_object())
-            .ok_or("Cannot check if value is of a type that is null, undefined, or not a class")?
-            .inner_class_definition();
+        else {
+            return Err(Error::AvmError(type_error(
+                self,
+                "Error #1041: The right-hand side of operator must be a class.",
+                1041,
+            )?));
+        };
         let value = self.pop_stack();
 
-        let is_instance_of = value.is_of_type(self, type_object);
+        let is_instance_of = value.is_of_type(self, type_object.inner_class_definition());
         self.push_stack(is_instance_of);
 
         Ok(FrameControl::Continue)

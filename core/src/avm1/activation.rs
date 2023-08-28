@@ -4,7 +4,7 @@ use crate::avm1::function::{Avm1Function, ExecutionReason, FunctionObject};
 use crate::avm1::object::{Object, TObject};
 use crate::avm1::property::Attribute;
 use crate::avm1::runtime::skip_actions;
-use crate::avm1::scope::Scope;
+use crate::avm1::scope::{Scope, ScopeClass};
 use crate::avm1::{fscommand, globals, scope, ArrayObject, ScriptObject, Value};
 use crate::backend::navigator::{NavigationMethod, Request};
 use crate::context::UpdateContext;
@@ -15,7 +15,7 @@ use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
 use crate::tag_utils::SwfSlice;
 use crate::vminterface::Instantiator;
 use crate::{avm_error, avm_warn};
-use gc_arena::{Gc, GcCell, MutationContext};
+use gc_arena::{Gc, GcCell, Mutation};
 use indexmap::IndexMap;
 use instant::Instant;
 use rand::Rng;
@@ -2970,6 +2970,17 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.scope = scope;
     }
 
+    pub fn set_scope_to_display_object(&mut self, object: DisplayObject<'gc>) {
+        self.scope = Gc::new(
+            self.context.gc_context,
+            Scope::new(
+                self.scope,
+                ScopeClass::Target,
+                object.object().coerce_to_object(self),
+            ),
+        );
+    }
+
     /// Whether this activation operates in a local scope.
     pub fn in_local_scope(&self) -> bool {
         let mut current_scope = Some(self.scope);
@@ -3047,7 +3058,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .unwrap_or(false)
     }
 
-    pub fn allocate_local_registers(&mut self, num: u8, mc: MutationContext<'gc, '_>) {
+    pub fn allocate_local_registers(&mut self, num: u8, mc: &Mutation<'gc>) {
         self.local_registers = match num {
             0 => None,
             num => Some(GcCell::new(mc, RegisterSet::new(num))),

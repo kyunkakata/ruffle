@@ -12,7 +12,6 @@ use crate::avm2::QName;
 use crate::avm2::{ArrayObject, ArrayStorage};
 use crate::string::{AvmString, WString};
 use gc_arena::GcCell;
-use std::iter;
 
 // All of these methods will be defined as both
 // AS3 instance methods and methods on the `String` class prototype.
@@ -189,10 +188,6 @@ fn from_char_code<'gc>(
     let mut out = WString::with_capacity(args.len(), false);
     for arg in args {
         let i = arg.coerce_to_u32(activation)? as u16;
-        if i == 0 {
-            // Ignore nulls.
-            continue;
-        }
         out.push(i);
     }
     Ok(AvmString::new(activation.context.gc_context, out).into())
@@ -206,7 +201,7 @@ fn index_of<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = Value::from(this).coerce_to_string(activation)?;
     let pattern = match args.get(0) {
-        None => return Ok(Value::Undefined),
+        None => return Ok(Value::Integer(-1)),
         Some(s) => s.clone().coerce_to_string(activation)?,
     };
 
@@ -464,14 +459,6 @@ fn split<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let delimiter = args.get(0).unwrap_or(&Value::Undefined);
-    if matches!(delimiter, Value::Undefined) {
-        let this = Value::from(this);
-        return Ok(
-            ArrayObject::from_storage(activation, iter::once(this).collect())
-                .unwrap()
-                .into(),
-        );
-    }
 
     let this = Value::from(this).coerce_to_string(activation)?;
     let limit = match args.get(1).unwrap_or(&Value::Undefined) {
@@ -622,7 +609,13 @@ fn to_string<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::from(this))
+    if let Some(this) = this.as_primitive() {
+        if let Value::String(v) = *this {
+            return Ok(v.into());
+        }
+    }
+
+    Ok("".into())
 }
 
 /// Implements `String.valueOf`

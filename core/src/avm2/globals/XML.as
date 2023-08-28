@@ -76,6 +76,16 @@ package {
         AS3 native function text():XMLList;
         AS3 native function toString():String;
         AS3 native function length():int;
+        AS3 native function comments():XMLList;
+        AS3 native function processingInstructions(name:String = "*"):XMLList;
+
+        AS3 function valueOf():XML {
+            return this;
+        }
+
+        AS3 function toJSON(k:String) : * {
+            return this.toJSON(k);
+        }
 
         public static var ignoreComments:Boolean = true;
         public static var ignoreProcessingInstructions:Boolean = true;
@@ -193,6 +203,20 @@ package {
         prototype.length = function():int {
             var self:XML = this;
             return self.AS3::length();
+        }
+
+        prototype.toJSON = function(k:String):* {
+            return "XML";
+        };
+
+        prototype.comments = function():XMLList {
+            var self:XML = this;
+            return self.AS3::comments();
+        }
+
+        prototype.processingInstructions = function(name:String = "*"):XMLList {
+            var self:XML = this;
+            return self.AS3::processingInstructions(name);
         }
 
         public static const length:int = 1;

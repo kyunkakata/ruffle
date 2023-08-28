@@ -77,6 +77,9 @@
     "action_reload": {
         "message": "刷新页面以应用更改"
     },
+    "open_player_page": {
+        "message": "打开 SWF 播放器"
+    },
     "open_settings_page": {
         "message": "打开设置页"
     },
@@ -84,7 +87,7 @@
         "message": "设置"
     },
     "description": {
-        "message": "将 Flash 重新带回网络。"
+        "message": "将 Flash 移动到 web 中的默认位置。"
     },
     "save_settings": {
         "message": "保存设置"

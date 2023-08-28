@@ -11,7 +11,7 @@ use crate::avm2::Namespace;
 use crate::avm2::QName;
 use crate::string::AvmString;
 use crate::tag_utils::{self, ControlFlow, SwfMovie, SwfSlice, SwfStream};
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, GcCell, Mutation};
 use std::sync::Arc;
 use swf::TagCode;
 
@@ -77,6 +77,7 @@ pub struct SystemClasses<'gc> {
     pub graphicspath: ClassObject<'gc>,
     pub graphicstrianglepath: ClassObject<'gc>,
     pub graphicssolidfill: ClassObject<'gc>,
+    pub graphicsshaderfill: ClassObject<'gc>,
     pub graphicsstroke: ClassObject<'gc>,
     pub loader: ClassObject<'gc>,
     pub loaderinfo: ClassObject<'gc>,
@@ -110,6 +111,7 @@ pub struct SystemClasses<'gc> {
     pub rectangle: ClassObject<'gc>,
     pub keyboardevent: ClassObject<'gc>,
     pub point: ClassObject<'gc>,
+    pub evalerror: ClassObject<'gc>,
     pub rangeerror: ClassObject<'gc>,
     pub referenceerror: ClassObject<'gc>,
     pub argumenterror: ClassObject<'gc>,
@@ -202,6 +204,7 @@ impl<'gc> SystemClasses<'gc> {
             graphicspath: object,
             graphicstrianglepath: object,
             graphicssolidfill: object,
+            graphicsshaderfill: object,
             graphicsstroke: object,
             loader: object,
             loaderinfo: object,
@@ -233,6 +236,7 @@ impl<'gc> SystemClasses<'gc> {
             rectangle: object,
             keyboardevent: object,
             point: object,
+            evalerror: object,
             rangeerror: object,
             referenceerror: object,
             argumenterror: object,
@@ -306,7 +310,7 @@ fn function<'gc>(
 /// This allows the caller to pre-populate the class's prototype with dynamic
 /// properties, if necessary.
 fn dynamic_class<'gc>(
-    mc: MutationContext<'gc, '_>,
+    mc: &Mutation<'gc>,
     class_object: ClassObject<'gc>,
     script: Script<'gc>,
     // The `ClassObject` of the `Class` class
@@ -731,6 +735,7 @@ fn load_playerglobal<'gc>(
             ("", "Error", error),
             ("", "ArgumentError", argumenterror),
             ("", "QName", qname),
+            ("", "EvalError", evalerror),
             ("", "RangeError", rangeerror),
             ("", "RegExp", regexp),
             ("", "ReferenceError", referenceerror),

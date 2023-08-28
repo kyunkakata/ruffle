@@ -108,7 +108,7 @@ pub fn to_string<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let node = xml.node();
-    Ok(Value::String(node.xml_to_string(activation)?))
+    Ok(Value::String(node.xml_to_string(activation)))
 }
 
 pub fn to_xml_string<'gc>(
@@ -118,7 +118,7 @@ pub fn to_xml_string<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let node = xml.node();
-    Ok(Value::String(node.xml_to_xml_string(activation)?))
+    Ok(Value::String(node.xml_to_xml_string(activation)))
 }
 
 pub fn child<'gc>(
@@ -334,29 +334,37 @@ pub fn append_child<'gc>(
         }
     } else {
         // Appending a non-XML/XMLList object
-        let last_child_name = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
-            let num_children = children.len();
+        let (last_child_namespace, last_child_name) =
+            if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+                let num_children = children.len();
 
-            match num_children {
-                0 => None,
-                _ => children[num_children - 1].local_name(),
-            }
-        } else {
-            // FIXME - figure out exactly when appending is allowed in FP,
-            // and throw the proper AVM error.
-            return Err(Error::RustError(
-                format!(
-                    "Cannot append child {child:?} to node {:?}",
-                    xml.node().kind()
-                )
-                .into(),
-            ));
-        };
+                match num_children {
+                    0 => (None, None),
+                    _ => (
+                        children[num_children - 1].namespace(),
+                        children[num_children - 1].local_name(),
+                    ),
+                }
+            } else {
+                // FIXME - figure out exactly when appending is allowed in FP,
+                // and throw the proper AVM error.
+                return Err(Error::RustError(
+                    format!(
+                        "Cannot append child {child:?} to node {:?}",
+                        xml.node().kind()
+                    )
+                    .into(),
+                ));
+            };
 
         let text = child.coerce_to_string(activation)?;
         if let Some(last_child_name) = last_child_name {
-            let element_node =
-                E4XNode::element(activation.context.gc_context, last_child_name, *xml.node()); // Creating an element requires passing a parent node, unlike creating a text node
+            let element_node = E4XNode::element(
+                activation.context.gc_context,
+                last_child_namespace,
+                last_child_name,
+                *xml.node(),
+            ); // Creating an element requires passing a parent node, unlike creating a text node
 
             let text_node = E4XNode::text(activation.context.gc_context, text, None);
 
@@ -434,4 +442,46 @@ pub fn has_simple_content<'gc>(
     let xml_obj = this.as_xml_object().unwrap();
     let result = xml_obj.node().has_simple_content();
     Ok(result.into())
+}
+
+pub fn comments<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let comments = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+        children
+            .iter()
+            .filter(|node| matches!(&*node.kind(), E4XNodeKind::Comment(_)))
+            .map(|node| E4XOrXml::E4X(*node))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(XmlListObject::new(activation, comments, Some(xml.into())).into())
+}
+
+pub fn processing_instructions<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let nodes = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+        children
+            .iter()
+            .filter(|node| {
+                matches!(&*node.kind(), E4XNodeKind::ProcessingInstruction(_))
+                    && node.matches_name(&multiname)
+            })
+            .map(|node| E4XOrXml::E4X(*node))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(XmlListObject::new(activation, nodes, Some(xml.into())).into())
 }

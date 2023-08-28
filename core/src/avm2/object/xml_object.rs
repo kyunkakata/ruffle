@@ -8,7 +8,7 @@ use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname};
 use core::fmt;
-use gc_arena::{Collect, GcCell, GcWeakCell, MutationContext};
+use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
 use std::cell::{Ref, RefMut};
 
 use super::xml_list_object::E4XOrXml;
@@ -66,7 +66,7 @@ impl<'gc> XmlObject<'gc> {
             },
         ))
     }
-    pub fn set_node(&self, mc: MutationContext<'gc, '_>, node: E4XNode<'gc>) {
+    pub fn set_node(&self, mc: &Mutation<'gc>, node: E4XNode<'gc>) {
         self.0.write(mc).node = node;
     }
 
@@ -122,8 +122,8 @@ impl<'gc> XmlObject<'gc> {
                         E4XNodeKind::Text(_) | E4XNodeKind::CData(_) | E4XNodeKind::Attribute(_)
                     ) && self.node().has_simple_content())
                 {
-                    return Ok(self.node().xml_to_string(activation)?
-                        == xml_obj.node().xml_to_string(activation)?);
+                    return Ok(self.node().xml_to_string(activation)
+                        == xml_obj.node().xml_to_string(activation));
                 }
 
                 return self.equals(other, activation);
@@ -132,9 +132,7 @@ impl<'gc> XmlObject<'gc> {
 
         // 4. If (Type(x) is XML) and x.hasSimpleContent() == true)
         if self.node().has_simple_content() {
-            return Ok(
-                self.node().xml_to_string(activation)? == other.coerce_to_string(activation)?
-            );
+            return Ok(self.node().xml_to_string(activation) == other.coerce_to_string(activation)?);
         }
 
         // It seems like everything else will just ultimately fall-through to the last step.
@@ -147,7 +145,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         Ref::map(self.0.read(), |read| &read.base)
     }
 
-    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
+    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
         RefMut::map(self.0.write(mc), |write| &mut write.base)
     }
 
@@ -155,7 +153,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         self.0.as_ptr() as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
+    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Value::Object(Object::from(*self)))
     }
 
@@ -196,36 +194,34 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
                     }
                 }
             }
-
-            let matched_children = if let E4XNodeKind::Element {
-                children,
-                attributes,
-            } = &*read.node.kind()
-            {
-                let search_children = if name.is_attribute() {
-                    attributes
-                } else {
-                    children
-                };
-
-                search_children
-                    .iter()
-                    .filter_map(|child| {
-                        if child.matches_name(name) {
-                            Some(E4XOrXml::E4X(*child))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-
-            return Ok(XmlListObject::new(activation, matched_children, Some(self.into())).into());
         }
 
-        read.base.get_property_local(name, activation)
+        let matched_children = if let E4XNodeKind::Element {
+            children,
+            attributes,
+        } = &*read.node.kind()
+        {
+            let search_children = if name.is_attribute() {
+                attributes
+            } else {
+                children
+            };
+
+            search_children
+                .iter()
+                .filter_map(|child| {
+                    if child.matches_name(name) {
+                        Some(E4XOrXml::E4X(*child))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        return Ok(XmlListObject::new(activation, matched_children, Some(self.into())).into());
     }
 
     fn call_property_local(
@@ -254,7 +250,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             if let Some(list) = prop.as_object().and_then(|obj| obj.as_xml_list_object()) {
                 if list.length() == 0 && this.node().has_simple_content() {
                     let receiver = PrimitiveObject::from_primitive(
-                        this.node().xml_to_string(activation)?.into(),
+                        this.node().xml_to_string(activation).into(),
                         activation,
                     )?;
                     return receiver.call_property(multiname, arguments, activation);
@@ -263,7 +259,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         }
 
         return method
-            .as_callable(activation, Some(multiname), Some(self.into()))?
+            .as_callable(activation, Some(multiname), Some(self.into()), false)?
             .call(self.into(), arguments, activation);
     }
 
@@ -312,27 +308,10 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        if name.has_explicit_namespace() {
-            return Err(format!(
-                "Can not set property {:?} with an explicit namespace yet",
-                name
-            )
-            .into());
-        }
-
         let mc = activation.context.gc_context;
 
         if name.is_attribute() {
             self.delete_property_local(activation, name)?;
-            if let Some(obj) = value.as_object() {
-                if obj.as_xml_object().is_some() || obj.as_xml_list_object().is_some() {
-                    return Err(format!(
-                        "Cannot set an XML/XMLList object {:?} as an attribute",
-                        obj
-                    )
-                    .into());
-                }
-            }
             let Some(local_name) = name.local_name() else {
                 return Err(format!("Cannot set attribute {:?} without a local name", name).into());
             };
@@ -376,8 +355,12 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             .collect();
         match matches.as_slice() {
             [] => {
-                let element_with_text =
-                    E4XNode::element(mc, name.local_name().unwrap(), write.node);
+                let element_with_text = E4XNode::element(
+                    mc,
+                    name.explict_namespace(),
+                    name.local_name().unwrap(),
+                    write.node,
+                );
                 element_with_text.append_child(mc, E4XNode::text(mc, text, Some(self_node)))?;
                 children.push(element_with_text);
                 Ok(())

@@ -1,6 +1,7 @@
 {
     "manifest_version": 2,
-    "name": "Ruffle",
+    "name": "Ruffle - Flash Emulator",
+    "short_name": "Ruffle",
     "version": null, // Filled by Webpack.
     "default_locale": "en",
     "description": "__MSG_description__",
@@ -45,10 +46,8 @@
         "open_in_tab": true,
     },
     "permissions": [
-        "<all_urls>",
-        "storage",
-        "webRequest",
-        "webRequestBlocking",
+        "<all_urls>", // // To allow script injecting + the internal player to bypass CORS
+        "storage"
     ],
     "web_accessible_resources": ["*"],
 }
