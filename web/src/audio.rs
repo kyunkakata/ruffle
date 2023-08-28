@@ -31,9 +31,9 @@ pub struct WebAudioBackend {
 impl WebAudioBackend {
     /// These govern the adaptive buffer size algorithm, all are in number of frames (pairs of samples).
     /// They must all be integer powers of 2 (due to how the algorithm works).
-    const INITIAL_BUFFER_SIZE: u32 = 2048; // 46.44 ms at 44.1 kHz
-    const MIN_BUFFER_SIZE: u32 = 1024; // 23.22 ms at 44.1 kHz
-    const MAX_BUFFER_SIZE: u32 = 16384; // 371.52 ms at 44.1 kHz
+    const INITIAL_BUFFER_SIZE: u32 = 128; // 46.44 ms at 44.1 kHz
+    const MIN_BUFFER_SIZE: u32 = 32; // 23.22 ms at 44.1 kHz
+    const MAX_BUFFER_SIZE: u32 = 8096; // 371.52 ms at 44.1 kHz
     /// Buffer size will not be increased until this many seconds have elapsed after startup,
     /// to account for any initialization (shape tessellation, WASM JIT, etc.) hitches.
     const WARMUP_PERIOD: f32 = 2.0;
@@ -177,7 +177,7 @@ impl Buffer {
             }
             if self.time.get() as f32 > WebAudioBackend::WARMUP_PERIOD {
                 if self.buffer_size.get() < WebAudioBackend::MAX_BUFFER_SIZE {
-                    self.buffer_size.set(self.buffer_size.get() * 2);
+                    self.buffer_size.set(self.buffer_size.get() * 4);
                     tracing::debug!(
                         "Increased audio buffer size to {} frames",
                         self.buffer_size.get()
