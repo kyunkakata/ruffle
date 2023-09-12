@@ -1641,7 +1641,7 @@ impl<'gc> EditText<'gc> {
         activation.set_scope_to_display_object(parent);
         let this = parent.object().coerce_to_object(&mut activation);
 
-        if let Some((name, args)) = address.split_once(b',') {
+        if let Some((name, args)) = address.rsplit_once(b',') {
             let name = AvmString::new(activation.context.gc_context, name);
             let args = AvmString::new(activation.context.gc_context, args);
             let function = activation.get_variable(name)?;
