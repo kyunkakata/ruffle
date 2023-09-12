@@ -141,6 +141,7 @@ export class RufflePlayer extends HTMLElement {
     private readonly splashScreen: HTMLElement;
     private readonly virtualKeyboard: HTMLInputElement;
     private readonly saveManager: HTMLDivElement;
+    private readonly volumeControls: HTMLDivElement;
     private readonly videoModal: HTMLDivElement;
 
     private readonly contextMenuOverlay: HTMLElement;
@@ -173,6 +174,8 @@ export class RufflePlayer extends HTMLElement {
     private longPressTimer: ReturnType<typeof setTimeout> | null = null;
     private pointerDownPosition: Point | null = null;
     private pointerMoveMaxDistance = 0;
+
+    private volumeSettings: VolumeControls;
 
     /**
      * Triggered when a movie metadata has been loaded (such as movie width and height).
@@ -258,8 +261,16 @@ export class RufflePlayer extends HTMLElement {
         this.videoModal = <HTMLDivElement>(
             this.shadow.getElementById("video-modal")!
         );
+        this.volumeControls = <HTMLDivElement>(
+            this.shadow.getElementById("volume-controls-modal")
+        );
         this.addModalJavaScript(this.saveManager);
+        this.addModalJavaScript(this.volumeControls);
         this.addModalJavaScript(this.videoModal);
+
+        this.volumeSettings = new VolumeControls(false, 100);
+        this.addVolumeControlsJavaScript(this.volumeControls);
+
         const backupSaves = <HTMLElement>(
             this.saveManager.querySelector("#backup-saves")
         );
@@ -348,6 +359,67 @@ export class RufflePlayer extends HTMLElement {
                 }
             });
         }
+    }
+
+    /**
+     * Add the volume control texts, set the controls to the current settings and
+     * add event listeners to update the settings and controls when being changed.
+     *
+     * @param volumeControlsModal The element containing the volume controls modal.
+     */
+    private addVolumeControlsJavaScript(
+        volumeControlsModal: HTMLDivElement,
+    ): void {
+        const muteCheckbox = volumeControlsModal.querySelector(
+            "#mute-checkbox",
+        ) as HTMLInputElement;
+        const volumeSlider = volumeControlsModal.querySelector(
+            "#volume-slider",
+        ) as HTMLInputElement;
+        const volumeSliderText = volumeControlsModal.querySelector(
+            "#volume-slider-text",
+        ) as HTMLSpanElement;
+
+        const heading = volumeControlsModal.querySelector(
+            "#volume-controls-heading",
+        ) as HTMLHeadingElement;
+        const muteCheckboxLabel = volumeControlsModal.querySelector(
+            "#mute-checkbox-label",
+        ) as HTMLLabelElement;
+        const volumeSliderLabel = volumeControlsModal.querySelector(
+            "#volume-slider-label",
+        ) as HTMLLabelElement;
+
+        // Add the texts.
+        heading.textContent = text("volume-controls");
+        muteCheckboxLabel.textContent = text("volume-controls-mute");
+        volumeSliderLabel.textContent = text("volume-controls-volume");
+
+        // Set the controls to the current settings.
+        muteCheckbox.checked = this.volumeSettings.isMuted;
+        volumeSlider.disabled = muteCheckbox.checked;
+        volumeSlider.valueAsNumber = this.volumeSettings.volume;
+        volumeSliderLabel.style.color = muteCheckbox.checked ? "grey" : "black";
+        volumeSliderText.style.color = muteCheckbox.checked ? "grey" : "black";
+        volumeSliderText.textContent = String(this.volumeSettings.volume);
+
+        // Add event listeners to update the settings and controls.
+        muteCheckbox.addEventListener("change", () => {
+            volumeSlider.disabled = muteCheckbox.checked;
+            volumeSliderLabel.style.color = muteCheckbox.checked
+                ? "grey"
+                : "black";
+            volumeSliderText.style.color = muteCheckbox.checked
+                ? "grey"
+                : "black";
+            this.volumeSettings.isMuted = muteCheckbox.checked;
+            this.instance?.set_volume(this.volumeSettings.get_volume());
+        });
+        volumeSlider.addEventListener("input", () => {
+            volumeSliderText.textContent = volumeSlider.value;
+            this.volumeSettings.volume = volumeSlider.valueAsNumber;
+            this.instance?.set_volume(this.volumeSettings.get_volume());
+        });
     }
 
     /**
@@ -577,6 +649,8 @@ export class RufflePlayer extends HTMLElement {
             this,
             this.loadedConfig,
         );
+        this.instance!.set_volume(this.volumeSettings.get_volume());
+
         this.rendererDebugInfo = this.instance!.renderer_debug_info();
 
         const actuallyUsedRendererName = this.instance!.renderer_name();
@@ -837,6 +911,8 @@ export class RufflePlayer extends HTMLElement {
     /**
      * Returns the master volume of the player.
      *
+     * The volume is linear and not adapted for logarithmic hearing.
+     *
      * @returns The volume. 1.0 is 100% volume.
      */
     get volume(): number {
@@ -848,6 +924,8 @@ export class RufflePlayer extends HTMLElement {
 
     /**
      * Sets the master volume of the player.
+     *
+     * The volume should be linear and not adapted for logarithmic hearing.
      *
      * @param value The volume. 1.0 is 100% volume.
      */
@@ -1172,6 +1250,13 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Opens the volume controls.
+     */
+    private openVolumeControls(): void {
+        this.volumeControls.classList.remove("hidden");
+    }
+
+    /**
      * Fetches the loaded SWF and downloads it.
      */
     async downloadSwf(): Promise<void> {
@@ -1269,6 +1354,13 @@ export class RufflePlayer extends HTMLElement {
                 });
             }
         }
+
+        items.push({
+            text: text("context-menu-volume-controls"),
+            onClick: () => {
+                this.openVolumeControls();
+            },
+        });
 
         if (
             this.instance &&
@@ -1372,7 +1464,10 @@ export class RufflePlayer extends HTMLElement {
     }
 
     private showContextMenu(event: MouseEvent | PointerEvent): void {
-        if (this.panicked || !this.saveManager.classList.contains("hidden")) {
+        const modalOpen = Array.from(
+            this.shadow.querySelectorAll(".modal"),
+        ).some((modal) => !modal.classList.contains("hidden"));
+        if (this.panicked || modalOpen) {
             return;
         }
 
@@ -2273,4 +2368,27 @@ export function isFallbackElement(elem: Element): boolean {
         parent = parent.parentElement;
     }
     return false;
+}
+
+/**
+ * The volume controls of the Ruffle web GUI.
+ */
+class VolumeControls {
+    isMuted: boolean;
+    volume: number;
+
+    constructor(isMuted: boolean, volume: number) {
+        this.isMuted = isMuted;
+        this.volume = volume;
+    }
+
+    /**
+     * Returns the volume between 0 and 1 (calculated out of the
+     * checkbox and the slider).
+     *
+     * @returns The volume between 0 and 1.
+     */
+    public get_volume(): number {
+        return !this.isMuted ? this.volume / 100 : 0;
+    }
 }

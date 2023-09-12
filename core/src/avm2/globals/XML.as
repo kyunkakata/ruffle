@@ -59,6 +59,7 @@ package {
         AS3 native function hasComplexContent():Boolean;
         AS3 native function hasSimpleContent():Boolean;
         AS3 native function name():Object;
+        AS3 native function setName(name:*):void;
         AS3 native function namespace(prefix:String = null):*;
         AS3 native function localName():Object;
         AS3 native function toXMLString():String;
@@ -72,12 +73,17 @@ package {
         AS3 native function attribute(name:*):XMLList;
         AS3 native function nodeKind():String;
         AS3 native function appendChild(child:Object):XML;
+        AS3 native function prependChild(child:Object):XML;
         AS3 native function descendants(name:Object = "*"):XMLList;
         AS3 native function text():XMLList;
         AS3 native function toString():String;
         AS3 native function length():int;
         AS3 native function comments():XMLList;
         AS3 native function processingInstructions(name:String = "*"):XMLList;
+        AS3 native function insertChildAfter(child1:Object, child2:Object):*;
+        AS3 native function insertChildBefore(child1:Object, child2:Object):*;
+        // NOTE: Docs lie, value can be anything not just XML.
+        AS3 native function replace(propertyName:Object, value:*):XML;
 
         AS3 function valueOf():XML {
             return this;
@@ -185,6 +191,11 @@ package {
             return self.AS3::appendChild(child);
         };
 
+        prototype.prependChild = function(child:Object):XML {
+            var self:XML = this;
+            return self.AS3::prependChild(child);
+        };
+
         prototype.descendants = function(name:Object):XMLList {
             var self:XML = this;
             return self.AS3::descendants(name);
@@ -217,6 +228,21 @@ package {
         prototype.processingInstructions = function(name:String = "*"):XMLList {
             var self:XML = this;
             return self.AS3::processingInstructions(name);
+        }
+
+        prototype.insertChildAfter = function(child1:Object, child2:Object):* {
+            var self:XML = this;
+            return self.AS3::insertChildAfter(child1, child2);
+        }
+
+        prototype.insertChildBefore = function(child1:Object, child2:Object):* {
+            var self:XML = this;
+            return self.AS3::insertChildBefore(child1, child2);
+        }
+
+        prototype.replace = function(propertyName:Object, value:*):XML {
+            var self:XML = this;
+            return self.AS3::replace(propertyName, value);
         }
 
         public static const length:int = 1;

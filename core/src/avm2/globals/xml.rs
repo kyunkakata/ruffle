@@ -81,6 +81,53 @@ pub fn name<'gc>(
     }
 }
 
+pub fn set_name<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let node = xml.node();
+
+    let is_attribute_or_element = matches!(
+        &*node.kind(),
+        E4XNodeKind::Attribute(_)
+            | E4XNodeKind::ProcessingInstruction(_)
+            | E4XNodeKind::Element { .. }
+    );
+
+    if !is_attribute_or_element {
+        return Ok(Value::Undefined);
+    }
+
+    let new_name = args.get_value(0);
+
+    let new_name = if let Some(qname) = new_name.as_object().and_then(|q| q.as_qname_object()) {
+        let has_no_ns = qname.name().is_any_namespace()
+            || (qname.name().namespace_set().len() == 1
+                && qname.name().namespace_set()[0].is_public());
+        if !has_no_ns {
+            avm2_stub_method!(activation, "XML", "setName", "with QName namespaces");
+        }
+        qname.local_name()
+    } else {
+        new_name.coerce_to_string(activation)?
+    };
+
+    let is_name_valid = crate::avm2::e4x::is_xml_name(activation, new_name.into())?;
+    if !is_name_valid {
+        return Err(Error::AvmError(type_error(
+            activation,
+            &format!("Error #1117: Invalid XML name: {}.", new_name),
+            1117,
+        )?));
+    }
+
+    node.set_local_name(new_name, activation.context.gc_context);
+
+    Ok(Value::Undefined)
+}
+
 pub fn namespace<'gc>(
     activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
@@ -386,6 +433,21 @@ pub fn append_child<'gc>(
     Ok(this.into())
 }
 
+// ECMA-357 13.4.4.29 XML.prototype.prependChild ( value )
+pub fn prepend_child<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let child = args.get_value(0);
+    // 1. Call the [[Insert]] method of this object with arguments "0" and value
+    xml.node().insert(0, child, activation)?;
+
+    // 2. Return x
+    Ok(xml.into())
+}
+
 pub fn descendants<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -484,4 +546,178 @@ pub fn processing_instructions<'gc>(
     };
 
     Ok(XmlListObject::new(activation, nodes, Some(xml.into())).into())
+}
+
+// ECMA-357 13.4.4.18 XML.prototype.insertChildAfter (child1, child2)
+pub fn insert_child_after<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let child1 = args.try_get_object(activation, 0);
+    let child2 = args.get_object(activation, 1, "child2")?;
+
+    // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return
+    if !matches!(*xml.node().kind(), E4XNodeKind::Element { .. }) {
+        return Ok(Value::Undefined);
+    }
+
+    // 3. Else if Type(child1) is XML
+    if let Some(child1) = child1.and_then(|x| x.as_xml_object()) {
+        // NOTE: We fetch the index separately to avoid borrowing errors.
+        let index = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+            // 3.a. For i = 0 to x.[[Length]]-1
+            // 3.a.i. If x[i] is the same object as child1
+            children
+                .iter()
+                .position(|x| E4XNode::ptr_eq(*x, *child1.node()))
+        } else {
+            None
+        };
+
+        if let Some(index) = index {
+            // 3.a.i.1. Call the [[Insert]] method of x with arguments ToString(i + 1) and child2
+            xml.node().insert(index + 1, child2.into(), activation)?;
+            // 3.a.i.2. Return x
+            return Ok(xml.into());
+        }
+    // 2. If (child1 == null)
+    } else {
+        // 2.a. Call the [[Insert]] method of x with arguments "0" and child2
+        xml.node().insert(0, child2.into(), activation)?;
+        // 2.b. Return x
+        return Ok(xml.into());
+    }
+
+    // 4. Return
+    Ok(Value::Undefined)
+}
+
+// ECMA-357 13.4.4.19 XML.prototype.insertChildBefore (child1, child2)
+pub fn insert_child_before<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let child1 = args.try_get_object(activation, 0);
+    let child2 = args.get_object(activation, 1, "child2")?;
+
+    // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return
+    if !matches!(*xml.node().kind(), E4XNodeKind::Element { .. }) {
+        return Ok(Value::Undefined);
+    }
+
+    // 3. Else if Type(child1) is XML
+    if let Some(child1) = child1.and_then(|x| x.as_xml_object()) {
+        // NOTE: We fetch the index separately to avoid borrowing errors.
+        let index = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+            // 3.a. For i = 0 to x.[[Length]]-1
+            // 3.a.i. If x[i] is the same object as child1
+            children
+                .iter()
+                .position(|x| E4XNode::ptr_eq(*x, *child1.node()))
+        } else {
+            None
+        };
+
+        if let Some(index) = index {
+            // 3.a.i.1. Call the [[Insert]] method of x with arguments ToString(i) and child2
+            xml.node().insert(index, child2.into(), activation)?;
+            // 3.a.i.2. Return x
+            return Ok(xml.into());
+        }
+    // 2. If (child1 == null)
+    } else {
+        let length = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+            children.len()
+        } else {
+            0
+        };
+
+        // 2.a. Call the [[Insert]] method of x with arguments ToString(x.[[Length]]) and child2
+        xml.node().insert(length, child2.into(), activation)?;
+        // 2.b. Return x
+        return Ok(xml.into());
+    }
+
+    // 4. Return
+    Ok(Value::Undefined)
+}
+
+// ECMA-357 13.4.4.32 XML.prototype.replace (propertyName, value)
+pub fn replace<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let self_node = xml.node();
+    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let value = args.get_value(1);
+
+    // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return x
+    if !matches!(*self_node.kind(), E4XNodeKind::Element { .. }) {
+        return Ok(xml.into());
+    }
+
+    // 2. If Type(value) ∉ {XML, XMLList}, let c = ToString(value)
+    // 3. Else let c be the result of calling the [[DeepCopy]] method of value
+    let value = if let Some(xml) = value.as_object().and_then(|x| x.as_xml_object()) {
+        let node = xml.node();
+        XmlObject::new(node.deep_copy(activation.context.gc_context), activation).into()
+    } else if let Some(list) = value.as_object().and_then(|x| x.as_xml_list_object()) {
+        list.deep_copy(activation).into()
+    } else {
+        value
+    };
+
+    // 4. If ToString(ToUint32(P)) == P
+    if let Some(local_name) = multiname.local_name() {
+        if let Ok(index) = local_name.parse::<usize>() {
+            // 4.a. Call the [[Replace]] method of x with arguments P and c and return x
+            self_node.replace(index, value, activation)?;
+            return Ok(xml.into());
+        }
+    }
+
+    // 5. Let n be a QName object created as if by calling the function QName(P)
+
+    // NOTE: Since this part of the E4X spec is annoying to implement in Rust without borrow errors, we do it a bit differently.
+    //       1. First we will get the first elements index that matches our multiname.
+    //       2. Then we will delete all matches.
+    //       2. And then we insert a dummy E4XNode at the previously stored index, and use the replace method to correct it.
+
+    let index =
+        if let E4XNodeKind::Element { children, .. } = &mut *self_node.kind_mut(activation.gc()) {
+            let index = children
+                .iter()
+                .position(|x| multiname.is_any_name() || x.matches_name(&multiname));
+            children.retain(|x| {
+                if multiname.is_any_name() || x.matches_name(&multiname) {
+                    // Remove parent.
+                    x.set_parent(None, activation.gc());
+                    false
+                } else {
+                    true
+                }
+            });
+
+            if let Some(index) = index {
+                children.insert(index, E4XNode::dummy(activation.gc()));
+                index
+            // 8. If i == undefined, return x
+            } else {
+                return Ok(xml.into());
+            }
+        } else {
+            unreachable!("E4XNode kind should be of element kind");
+        };
+
+    // 9. Call the [[Replace]] method of x with arguments ToString(i) and c
+    self_node.replace(index, value, activation)?;
+
+    // 10. Return x
+    Ok(xml.into())
 }

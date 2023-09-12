@@ -28,7 +28,7 @@ num-traits = "0.2"
 num-derive = "0.4"
 quick-xml = "0.30.0"
 downcast-rs = "1.2.0"
-url = "2.4.0"
+url = "2.4.1"
 weak-table = "0.3.2"
 percent-encoding = "2.3.0"
 thiserror = "1.0"
@@ -46,13 +46,13 @@ dasp = { git = "https://github.com/RustAudio/dasp", rev = "f05a703", features = 
 symphonia = { version = "0.5.3", default-features = false, features = ["mp3"], optional = true }
 enumset = "1.1.2"
 bytemuck = "1.13.1"
-clap = { version = "4.4.0", features = ["derive"], optional=true }
+clap = { version = "4.4.2", features = ["derive"], optional=true }
 realfft = "3.3.0"
 hashbrown = { version = "0.14.0", features = ["raw"] }
 scopeguard = "1.2.0"
 fluent-templates = "0.8.0"
-egui = { version = "0.22.0", optional = true }
-egui_extras = { version = "0.22.0", optional = true }
+egui = { workspace = true, optional = true }
+egui_extras = { git = "https://github.com/emilk/egui", rev = "98087029e020a1b2d78a4eb840d0a8505340ecad", optional = true }
 png = { version = "0.17.10", optional = true }
 flv-rs = { path = "../flv" }
 async-channel = "1.9.0"
