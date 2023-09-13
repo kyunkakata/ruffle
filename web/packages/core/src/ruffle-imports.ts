@@ -22,7 +22,7 @@ export function copyToAudioBuffer(
     }
 
     if (rightData) {
-        const dstBuffer = audioBuffer.getChannelData(1);
+        const dstBuffer = audioBuffer.getChannelData(0);
         dstBuffer.set(rightData);
     }
 }
@@ -49,7 +49,7 @@ export function copyToAudioBufferInterleaved(
 ): void {
     const numSamples = audioBuffer.length;
     const leftBuffer = audioBuffer.getChannelData(0);
-    const rightBuffer = audioBuffer.getChannelData(1);
+    const rightBuffer = audioBuffer.getChannelData(0);
     let i = 0;
     let sample = 0;
     while (sample < numSamples) {

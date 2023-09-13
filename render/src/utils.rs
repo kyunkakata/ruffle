@@ -161,8 +161,8 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Er
     let jpeg_data = remove_invalid_jpeg_data(jpeg_data);
     let options = DecoderOptions::new_fast()
         .jpeg_set_max_scans(8)
-        .set_max_width(1500)
-        .set_max_height(1500);
+        .set_max_width(2500)
+        .set_max_height(2500);
     let mut decoder = JpegDecoder::new_with_options(options, &jpeg_data[..]);
     let result = decoder.decode();
     if result.is_err() {
@@ -325,8 +325,8 @@ fn decode_png(data: &[u8]) -> Result<Bitmap, Error> {
     let options = DecoderOptions::new_fast()
         .png_set_confirm_crc(false)
         .inflate_set_confirm_adler(false)
-        .set_max_width(1500)
-        .set_max_height(1500)
+        .set_max_width(2500)
+        .set_max_height(2500)
         .png_set_add_alpha_channel(true);
     let mut decoder = JpegDecoder::new_with_options(options, data);
 

@@ -290,7 +290,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     }
 
     fn clamp_bitmap(&mut self, bitmap: &mut Bitmap) -> bool {
-        let max_size = self.descriptors.limits.max_texture_dimension_2d;
+        let max_size = 2000;
         if bitmap.width() > max_size || bitmap.height() > max_size {
             let image =
                 image::RgbaImage::from_raw(bitmap.width(), bitmap.height(), bitmap.data().to_vec())

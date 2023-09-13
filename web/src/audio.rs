@@ -36,7 +36,7 @@ impl WebAudioBackend {
     const MAX_BUFFER_SIZE: u32 = 8096; // 371.52 ms at 44.1 kHz
     /// Buffer size will not be increased until this many seconds have elapsed after startup,
     /// to account for any initialization (shape tessellation, WASM JIT, etc.) hitches.
-    const WARMUP_PERIOD: f32 = 2.0;
+    const WARMUP_PERIOD: f32 = 1.0;
 
     /// For how long we need to fill every single buffer "quickly enough" in order to decrease buffer size.
     /// Measured in seconds. A higher value is more conservative.
@@ -125,7 +125,7 @@ impl Buffer {
             audio_buffer: vec![0.0; 2 * WebAudioBackend::INITIAL_BUFFER_SIZE as usize],
             js_buffer: audio
                 .context
-                .create_buffer(2, WebAudioBackend::INITIAL_BUFFER_SIZE, sample_rate)
+                .create_buffer(1, WebAudioBackend::INITIAL_BUFFER_SIZE, sample_rate)
                 .into_js_result()?,
             audio_node: None,
             on_ended_handler: Closure::new(|| {}),
@@ -214,7 +214,7 @@ impl Buffer {
                 f64::from(self.buffer_size.get()) / f64::from(self.context.sample_rate());
             self.js_buffer = self
                 .context
-                .create_buffer(2, self.buffer_size.get(), self.context.sample_rate())
+                .create_buffer(1, self.buffer_size.get(), self.context.sample_rate())
                 .into_js_result()?;
             self.audio_buffer
                 .resize(2 * self.buffer_size.get() as usize, 0.0);
