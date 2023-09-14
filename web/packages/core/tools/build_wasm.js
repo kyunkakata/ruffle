@@ -3,7 +3,7 @@ const { copyFileSync } = require("fs");
 const process = require("process");
 
 function runWasmOpt({ path, flags }) {
-    let args = ["-o", path, "-O", "-g", path];
+    let args = [ "-O4", "-o", path, "-g", path];
     if (flags) {
         args = args.concat(flags);
     }

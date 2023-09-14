@@ -363,7 +363,7 @@ pub struct AudioManager<'gc> {
 
 impl<'gc> AudioManager<'gc> {
     /// The maximum number of sound instances that can play at once.
-    pub const MAX_SOUNDS: usize = 20;
+    pub const MAX_SOUNDS: usize = 25;
 
     /// The default timeline stream buffer time in seconds.
     pub const DEFAULT_STREAM_BUFFER_TIME: i32 = 5;
