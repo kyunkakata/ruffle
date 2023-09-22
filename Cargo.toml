@@ -56,6 +56,9 @@ opt-level = 0
 panic = "unwind"
 
 [profile.release]
+codegen-units = 1 # Reduce parallelism to improve optimizations
+opt-level = 3 # Optimize for speed
+lto = true # Enable link-time optimization
 panic = "abort"
 
 [profile.dev.package.h263-rs]

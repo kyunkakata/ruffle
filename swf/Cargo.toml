@@ -23,5 +23,5 @@ enum-map = "2.6.1"
 simple_asn1 = "0.6.2"
 
 [features]
-default = ["libflate", "lzma"]
+default = ["flate2", "lzma"]
 lzma = ["lzma-rs"]
