@@ -11,7 +11,7 @@ use isahc::http::{HeaderName, HeaderValue};
 use isahc::{
     config::RedirectPolicy, prelude::*, AsyncReadResponseExt, HttpClient, Request as IsahcRequest,
 };
-use rfd::{AsyncMessageDialog, MessageButtons, MessageDialog, MessageLevel};
+use rfd::{AsyncMessageDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use ruffle_core::backend::navigator::{
     async_return, create_fetch_error, create_specific_fetch_error, ErrorResponse, NavigationMethod,
     NavigatorBackend, OpenURLMode, OwnedFuture, Request, SocketMode, SuccessResponse,
@@ -145,9 +145,10 @@ impl NavigatorBackend for ExternalNavigatorBackend {
             let confirm = MessageDialog::new()
                 .set_title("Open website?")
                 .set_level(MessageLevel::Info)
-                .set_description(&message)
+                .set_description(message)
                 .set_buttons(MessageButtons::OkCancel)
-                .show();
+                .show()
+                == MessageDialogResult::Ok;
             if !confirm {
                 tracing::info!("SWF tried to open a website, but the user declined the request");
                 return;
@@ -208,9 +209,9 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                         if e.kind() == ErrorKind::PermissionDenied {
                             let attempt_sandbox_open = MessageDialog::new()
                                 .set_level(MessageLevel::Warning)
-                                .set_description(&format!("The current movie is attempting to read files stored in {}.\n\nTo allow it to do so, click Yes, and then Open to grant read access to that directory.\n\nOtherwise, click No to deny access.", path.parent().unwrap_or(&path).to_string_lossy()))
+                                .set_description(format!("The current movie is attempting to read files stored in {}.\n\nTo allow it to do so, click Yes, and then Open to grant read access to that directory.\n\nOtherwise, click No to deny access.", path.parent().unwrap_or(&path).to_string_lossy()))
                                 .set_buttons(MessageButtons::YesNo)
-                                .show();
+                                .show() == MessageDialogResult::Yes;
 
                             if attempt_sandbox_open {
                                 FileDialog::new().set_directory(&path).pick_folder();
@@ -358,9 +359,9 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                     return Ok(());
                 }
                 (false, SocketMode::Ask) => {
-                    let attempt_sandbox_connect = AsyncMessageDialog::new().set_level(MessageLevel::Warning).set_description(&format!("The current movie is attempting to connect to {:?} (port {}).\n\nTo allow it to do so, click Yes to grant network access to that host.\n\nOtherwise, click No to deny access.", host, port)).set_buttons(MessageButtons::YesNo)
+                    let attempt_sandbox_connect = AsyncMessageDialog::new().set_level(MessageLevel::Warning).set_description(format!("The current movie is attempting to connect to {:?} (port {}).\n\nTo allow it to do so, click Yes to grant network access to that host.\n\nOtherwise, click No to deny access.", host, port)).set_buttons(MessageButtons::YesNo)
                     .show()
-                    .await;
+                    .await == MessageDialogResult::Yes;
 
                     if !attempt_sandbox_connect {
                         // fail the connection.

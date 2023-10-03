@@ -454,6 +454,66 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
+     * Polyfill of height getter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    get height(): string {
+        return this.getAttribute("height") || "";
+    }
+
+    /**
+     * Polyfill of height setter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    set height(height: string) {
+        this.setAttribute("height", height);
+    }
+
+    /**
+     * Polyfill of width getter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    get width(): string {
+        return this.getAttribute("width") || "";
+    }
+
+    /**
+     * Polyfill of width setter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    set width(widthVal: string) {
+        this.setAttribute("width", widthVal);
+    }
+
+    /**
+     * Polyfill of type getter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    get type(): string {
+        return this.getAttribute("type") || "";
+    }
+
+    /**
+     * Polyfill of type setter for HTMLEmbedElement and HTMLObjectElement
+     *
+     * @ignore
+     * @internal
+     */
+    set type(typeVal: string) {
+        this.setAttribute("type", typeVal);
+    }
+
+    /**
      * @ignore
      * @internal
      */
@@ -498,11 +558,11 @@ export class RufflePlayer extends HTMLElement {
      */
     protected updateStyles(): void {
         if (this.dynamicStyles.sheet) {
-            if (this.dynamicStyles.sheet.rules) {
+            if (this.dynamicStyles.sheet.cssRules) {
                 for (
-                    let i = 0;
-                    i < this.dynamicStyles.sheet.rules.length;
-                    i++
+                    let i = this.dynamicStyles.sheet.cssRules.length - 1;
+                    i >= 0;
+                    i--
                 ) {
                     this.dynamicStyles.sheet.deleteRule(i);
                 }

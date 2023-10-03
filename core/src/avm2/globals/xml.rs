@@ -8,6 +8,7 @@ use crate::avm2::object::{
 };
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::string::AvmString;
+use crate::avm2::Namespace;
 use crate::avm2::{Activation, Error, Multiname, Object, Value};
 use crate::avm2_stub_method;
 
@@ -114,7 +115,7 @@ pub fn set_name<'gc>(
         new_name.coerce_to_string(activation)?
     };
 
-    let is_name_valid = crate::avm2::e4x::is_xml_name(activation, new_name.into())?;
+    let is_name_valid = crate::avm2::e4x::is_xml_name(new_name);
     if !is_name_valid {
         return Err(Error::AvmError(type_error(
             activation,
@@ -128,15 +129,60 @@ pub fn set_name<'gc>(
     Ok(Value::Undefined)
 }
 
-pub fn namespace<'gc>(
+// namespace_internal_impl(hasPrefix:Boolean, prefix:String = null):*
+pub fn namespace_internal_impl<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
+    this: Object<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    // FIXME: Implement namespace support (including prefix)
     avm2_stub_method!(activation, "XML", "namespace");
-    let namespace = activation.avm2().public_namespace;
-    Ok(NamespaceObject::from_namespace(activation, namespace)?.into())
+
+    // FIXME:
+    // 1. Let y = x
+    // 2. Let inScopeNS = { }
+    // 3. While (y is not null)
+    //     a. For each ns in y.[[InScopeNamespaces]]
+    //     ....
+
+    let xml = this.as_xml_object().unwrap();
+    let node = xml.node();
+
+    // 4. If prefix was not specified
+    if args[0] == Value::Bool(false) {
+        // a. If x.[[Class]] ∈ {"text", "comment", "processing-instruction"}, return null
+        if matches!(
+            &*node.kind(),
+            E4XNodeKind::Text(_)
+                | E4XNodeKind::CData(_)
+                | E4XNodeKind::Comment(_)
+                | E4XNodeKind::ProcessingInstruction(_)
+        ) {
+            return Ok(Value::Null);
+        }
+
+        // b. Return the result of calling the [[GetNamespace]] method of x.[[Name]] with argument inScopeNS
+        // FIXME: Use inScopeNS
+        let namespace = match node.namespace() {
+            Some(ns) => Namespace::package(ns, &mut activation.context.borrow_gc()),
+            None => activation.avm2().public_namespace,
+        };
+        Ok(NamespaceObject::from_namespace(activation, namespace)?.into())
+    } else {
+        // a. Let prefix = ToString(prefix)
+        let prefix = args.get_string(activation, 1)?;
+
+        // b. Find a Namespace ns ∈ inScopeNS, such that ns.prefix = prefix. If no such ns exists, let ns = undefined.
+        // c. Return ns
+
+        // FIXME: Nodes currently either have zero or one namespace, which has the prefix "" (empty string)
+        Ok(match node.namespace() {
+            Some(ns) if prefix.is_empty() => {
+                let namespace = Namespace::package(ns, &mut activation.context.borrow_gc());
+                NamespaceObject::from_namespace(activation, namespace)?.into()
+            }
+            _ => Value::Undefined,
+        })
+    }
 }
 
 pub fn local_name<'gc>(
@@ -175,8 +221,18 @@ pub fn child<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let multiname = name_to_multiname(activation, &args[0], false)?;
-    // FIXME: Support numerical indexes.
     let children = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
+        if let Some(local_name) = multiname.local_name() {
+            if let Ok(index) = local_name.parse::<usize>() {
+                let children = if let Some(node) = children.get(index) {
+                    vec![E4XOrXml::E4X(*node)]
+                } else {
+                    Vec::new()
+                };
+                return Ok(XmlListObject::new(activation, children, None).into());
+            }
+        }
+
         children
             .iter()
             .filter(|node| node.matches_name(&multiname))
@@ -239,8 +295,7 @@ pub fn copy<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
-    let node = xml.node();
-    Ok(XmlObject::new(node.deep_copy(activation.context.gc_context), activation).into())
+    Ok(xml.deep_copy(activation).into())
 }
 
 pub fn parent<'gc>(
@@ -690,29 +745,12 @@ pub fn replace<'gc>(
     //       2. And then we insert a dummy E4XNode at the previously stored index, and use the replace method to correct it.
 
     let index =
-        if let E4XNodeKind::Element { children, .. } = &mut *self_node.kind_mut(activation.gc()) {
-            let index = children
-                .iter()
-                .position(|x| multiname.is_any_name() || x.matches_name(&multiname));
-            children.retain(|x| {
-                if multiname.is_any_name() || x.matches_name(&multiname) {
-                    // Remove parent.
-                    x.set_parent(None, activation.gc());
-                    false
-                } else {
-                    true
-                }
-            });
-
-            if let Some(index) = index {
-                children.insert(index, E4XNode::dummy(activation.gc()));
-                index
-            // 8. If i == undefined, return x
-            } else {
-                return Ok(xml.into());
-            }
+        if let Some((index, _)) = self_node.remove_matching_children(activation.gc(), &multiname) {
+            self_node.insert_at(activation.gc(), index, E4XNode::dummy(activation.gc()));
+            index
+        // 8. If i == undefined, return x
         } else {
-            unreachable!("E4XNode kind should be of element kind");
+            return Ok(xml.into());
         };
 
     // 9. Call the [[Replace]] method of x with arguments ToString(i) and c
