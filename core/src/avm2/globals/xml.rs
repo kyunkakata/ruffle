@@ -73,9 +73,7 @@ pub fn name<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let node = this.as_xml_object().unwrap();
     if let Some(local_name) = node.local_name() {
-        avm2_stub_method!(activation, "XML", "name", "namespaces");
-        // FIXME - use namespace
-        let namespace = activation.avm2().public_namespace;
+        let namespace = node.namespace(activation);
         Ok(QNameObject::from_name(activation, Multiname::new(namespace, local_name))?.into())
     } else {
         Ok(Value::Null)
@@ -162,10 +160,7 @@ pub fn namespace_internal_impl<'gc>(
 
         // b. Return the result of calling the [[GetNamespace]] method of x.[[Name]] with argument inScopeNS
         // FIXME: Use inScopeNS
-        let namespace = match node.namespace() {
-            Some(ns) => Namespace::package(ns, &mut activation.context.borrow_gc()),
-            None => activation.avm2().public_namespace,
-        };
+        let namespace = xml.namespace(activation);
         Ok(NamespaceObject::from_namespace(activation, namespace)?.into())
     } else {
         // a. Let prefix = ToString(prefix)
@@ -229,7 +224,7 @@ pub fn child<'gc>(
                 } else {
                     Vec::new()
                 };
-                return Ok(XmlListObject::new(activation, children, None).into());
+                return Ok(XmlListObject::new(activation, children, None, None).into());
             }
         }
 
@@ -242,7 +237,8 @@ pub fn child<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, children, Some(xml.into())).into())
+    // FIXME: If name is not a number index, then we should call [[Get]] (get_property_local) with the name.
+    Ok(XmlListObject::new(activation, children, Some(xml.into()), Some(multiname)).into())
 }
 
 pub fn child_index<'gc>(
@@ -286,7 +282,14 @@ pub fn children<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, children, Some(xml.into())).into())
+    // FIXME: Spec says to just call [[Get]] with * (any multiname).
+    Ok(XmlListObject::new(
+        activation,
+        children,
+        Some(xml.into()),
+        Some(Multiname::any(activation.gc())),
+    )
+    .into())
 }
 
 pub fn copy<'gc>(
@@ -334,7 +337,7 @@ pub fn elements<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, children, Some(xml.into())).into())
+    Ok(XmlListObject::new(activation, children, Some(xml.into()), None).into())
 }
 
 pub fn attributes<'gc>(
@@ -349,7 +352,14 @@ pub fn attributes<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, attributes, Some(xml.into())).into())
+    // FIXME: Spec/avmplus says to call [[Get]] with * attribute name (any attribute multiname).
+    Ok(XmlListObject::new(
+        activation,
+        attributes,
+        Some(xml.into()),
+        Some(Multiname::any_attribute(activation.gc())),
+    )
+    .into())
 }
 
 pub fn attribute<'gc>(
@@ -369,7 +379,8 @@ pub fn attribute<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, attributes, Some(xml.into())).into())
+    // FIXME: Spec/avmplus call [[Get]] with attribute name.
+    Ok(XmlListObject::new(activation, attributes, Some(xml.into()), Some(multiname)).into())
 }
 
 pub fn call_handler<'gc>(
@@ -424,8 +435,9 @@ pub fn append_child<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
-
     let child = args.get_value(0);
+    let child = crate::avm2::e4x::maybe_escape_child(activation, child)?;
+
     if let Some(child) = child.as_object().and_then(|o| o.as_xml_object()) {
         xml.node()
             .append_child(activation.context.gc_context, *child.node())?;
@@ -465,7 +477,7 @@ pub fn append_child<'gc>(
                 activation.context.gc_context,
                 last_child_namespace,
                 last_child_name,
-                *xml.node(),
+                Some(*xml.node()),
             ); // Creating an element requires passing a parent node, unlike creating a text node
 
             let text_node = E4XNode::text(activation.context.gc_context, text, None);
@@ -496,6 +508,8 @@ pub fn prepend_child<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let child = args.get_value(0);
+    let child = crate::avm2::e4x::maybe_escape_child(activation, child)?;
+
     // 1. Call the [[Insert]] method of this object with arguments "0" and value
     xml.node().insert(0, child, activation)?;
 
@@ -512,9 +526,10 @@ pub fn descendants<'gc>(
     let multiname = name_to_multiname(activation, &args[0], false)?;
     let mut descendants = Vec::new();
     xml.node().descendants(&multiname, &mut descendants);
-    Ok(XmlListObject::new(activation, descendants, Some(xml.into())).into())
+    Ok(XmlListObject::new(activation, descendants, None, None).into())
 }
 
+// ECMA-357 13.4.4.37 XML.prototype.text ( )
 pub fn text<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -530,7 +545,9 @@ pub fn text<'gc>(
     } else {
         Vec::new()
     };
-    Ok(XmlListObject::new(activation, nodes, Some(xml.into())).into())
+    // 1. Let list be a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    // 3. Return list
+    Ok(XmlListObject::new(activation, nodes, Some(xml.into()), None).into())
 }
 
 pub fn length<'gc>(
@@ -561,6 +578,7 @@ pub fn has_simple_content<'gc>(
     Ok(result.into())
 }
 
+// ECMA-357 13.4.4.9 XML.prototype.comments ( )
 pub fn comments<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -577,9 +595,12 @@ pub fn comments<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, comments, Some(xml.into())).into())
+    // 1. Let list be a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    // 3. Return list
+    Ok(XmlListObject::new(activation, comments, Some(xml.into()), None).into())
 }
 
+// ECMA-357 13.4.4.28 XML.prototype.processingInstructions ( [ name ] )
 pub fn processing_instructions<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -600,7 +621,9 @@ pub fn processing_instructions<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, nodes, Some(xml.into())).into())
+    // 3. Let list = a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    // 5. Return list
+    Ok(XmlListObject::new(activation, nodes, Some(xml.into()), None).into())
 }
 
 // ECMA-357 13.4.4.18 XML.prototype.insertChildAfter (child1, child2)
@@ -611,7 +634,8 @@ pub fn insert_child_after<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let child1 = args.try_get_object(activation, 0);
-    let child2 = args.get_object(activation, 1, "child2")?;
+    let child2 = args.get_value(1);
+    let child2 = crate::avm2::e4x::maybe_escape_child(activation, child2)?;
 
     // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return
     if !matches!(*xml.node().kind(), E4XNodeKind::Element { .. }) {
@@ -633,14 +657,14 @@ pub fn insert_child_after<'gc>(
 
         if let Some(index) = index {
             // 3.a.i.1. Call the [[Insert]] method of x with arguments ToString(i + 1) and child2
-            xml.node().insert(index + 1, child2.into(), activation)?;
+            xml.node().insert(index + 1, child2, activation)?;
             // 3.a.i.2. Return x
             return Ok(xml.into());
         }
     // 2. If (child1 == null)
     } else {
         // 2.a. Call the [[Insert]] method of x with arguments "0" and child2
-        xml.node().insert(0, child2.into(), activation)?;
+        xml.node().insert(0, child2, activation)?;
         // 2.b. Return x
         return Ok(xml.into());
     }
@@ -657,7 +681,8 @@ pub fn insert_child_before<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let child1 = args.try_get_object(activation, 0);
-    let child2 = args.get_object(activation, 1, "child2")?;
+    let child2 = args.get_value(1);
+    let child2 = crate::avm2::e4x::maybe_escape_child(activation, child2)?;
 
     // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return
     if !matches!(*xml.node().kind(), E4XNodeKind::Element { .. }) {
@@ -679,7 +704,7 @@ pub fn insert_child_before<'gc>(
 
         if let Some(index) = index {
             // 3.a.i.1. Call the [[Insert]] method of x with arguments ToString(i) and child2
-            xml.node().insert(index, child2.into(), activation)?;
+            xml.node().insert(index, child2, activation)?;
             // 3.a.i.2. Return x
             return Ok(xml.into());
         }
@@ -692,7 +717,7 @@ pub fn insert_child_before<'gc>(
         };
 
         // 2.a. Call the [[Insert]] method of x with arguments ToString(x.[[Length]]) and child2
-        xml.node().insert(length, child2.into(), activation)?;
+        xml.node().insert(length, child2, activation)?;
         // 2.b. Return x
         return Ok(xml.into());
     }

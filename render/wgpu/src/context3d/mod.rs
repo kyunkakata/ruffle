@@ -210,6 +210,8 @@ impl WgpuContext3D {
             .update_has_depth_texture(self.current_depth_texture_view.is_some());
         self.current_pipeline
             .update_sample_count(self.back_buffer_sample_count);
+        self.current_pipeline
+            .update_target_format(TextureFormat::Rgba8Unorm);
     }
 
     pub(crate) fn present(&mut self) {
@@ -347,13 +349,21 @@ pub struct VertexBufferWrapper {
     pub data_32_per_vertex: u8,
 }
 
+#[derive(Debug)]
 pub struct TextureWrapper {
     texture: wgpu::Texture,
 }
 
 impl IndexBuffer for IndexBufferWrapper {}
 impl VertexBuffer for VertexBufferWrapper {}
-impl ruffle_render::backend::Texture for TextureWrapper {}
+impl ruffle_render::backend::Texture for TextureWrapper {
+    fn width(&self) -> u32 {
+        self.texture.width()
+    }
+    fn height(&self) -> u32 {
+        self.texture.height()
+    }
+}
 
 // Context3D.setVertexBufferAt supports up to 8 vertex buffer attributes
 const MAX_VERTEX_ATTRIBUTES: usize = 8;
@@ -820,6 +830,8 @@ impl Context3D for WgpuContext3D {
                     .update_has_depth_texture(enable_depth_and_stencil);
                 self.current_pipeline.remove_texture(&texture);
                 self.current_pipeline.update_sample_count(sample_count);
+                self.current_pipeline
+                    .update_target_format(texture_wrapper.texture.format());
             }
 
             Context3DCommand::SetRenderToBackBuffer => {
@@ -1214,9 +1226,7 @@ fn convert_texture_format(input: Context3DTextureFormat) -> Result<wgpu::Texture
         // to be an alpha channel, so we're relying on SWFS doing "the right thing"
         // as with BgrPacked
         Context3DTextureFormat::Compressed => Ok(TextureFormat::Rgba8Unorm),
-        _ => Err(Error::Unimplemented(
-            format!("Texture format {input:?}").into(),
-        )),
+        Context3DTextureFormat::RgbaHalfFloat => Ok(TextureFormat::Rgba16Float),
     }
 }
 

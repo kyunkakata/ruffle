@@ -22,17 +22,17 @@ use crate::string::AvmString;
 use crate::vminterface::AvmObject;
 use flv_rs::{
     AudioData as FlvAudioData, AudioDataType as FlvAudioDataType, Error as FlvError, FlvReader,
-    Header as FlvHeader, ScriptData as FlvScriptData, SoundFormat as FlvSoundFormat,
-    SoundRate as FlvSoundRate, SoundSize as FlvSoundSize, SoundType as FlvSoundType, Tag as FlvTag,
-    TagData as FlvTagData, Value as FlvValue, VideoData as FlvVideoData,
-    VideoPacket as FlvVideoPacket,
+    FrameType as FlvFrameType, Header as FlvHeader, ScriptData as FlvScriptData,
+    SoundFormat as FlvSoundFormat, SoundRate as FlvSoundRate, SoundSize as FlvSoundSize,
+    SoundType as FlvSoundType, Tag as FlvTag, TagData as FlvTagData, Value as FlvValue,
+    VideoData as FlvVideoData, VideoPacket as FlvVideoPacket,
 };
 use gc_arena::{Collect, GcCell, Mutation};
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_video::frame::EncodedFrame;
 use ruffle_video::VideoStreamHandle;
 use std::cmp::max;
-use std::io::Seek;
+use std::io::{Seek, SeekFrom};
 use swf::{AudioCompression, SoundFormat, VideoCodec, VideoDeblocking};
 use thiserror::Error;
 use url::Url;
@@ -69,11 +69,14 @@ impl From<SubstreamError> for NetstreamError {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct StreamManager<'gc> {
-    /// List of actively playing streams.
+    /// List of streams that need tick processing.
     ///
     /// This is not the total list of all created NetStreams; only the ones
     /// that have been configured to play media.
-    playing_streams: Vec<NetStream<'gc>>,
+    ///
+    /// A stream becomes active if it is either playing streaming media or is
+    /// doing other tick-time processing such as seeking.
+    active_streams: Vec<NetStream<'gc>>,
 }
 
 impl<'gc> Default for StreamManager<'gc> {
@@ -85,41 +88,37 @@ impl<'gc> Default for StreamManager<'gc> {
 impl<'gc> StreamManager<'gc> {
     pub fn new() -> Self {
         StreamManager {
-            playing_streams: Vec::new(),
+            active_streams: Vec::new(),
         }
     }
 
-    pub fn ensure_playing(context: &mut UpdateContext<'_, 'gc>, stream: NetStream<'gc>) {
-        if !context.stream_manager.playing_streams.contains(&stream) {
-            context.stream_manager.playing_streams.push(stream);
+    /// Activate a `NetStream`.
+    ///
+    /// This can be called at any time to flag that a `NetStream` has work to
+    /// do, and called multiple times. The `NetStream` will determine what to
+    /// do at tick time.
+    pub fn activate(context: &mut UpdateContext<'_, 'gc>, stream: NetStream<'gc>) {
+        if !context.stream_manager.active_streams.contains(&stream) {
+            context.stream_manager.active_streams.push(stream);
         }
     }
 
-    pub fn ensure_paused(context: &mut UpdateContext<'_, 'gc>, stream: NetStream<'gc>) {
+    /// Deactivate a `NetStream`.
+    ///
+    /// This should only ever be called at tick time if the stream itself has
+    /// determined there is no future work for it to do.
+    pub fn deactivate(context: &mut UpdateContext<'_, 'gc>, stream: NetStream<'gc>) {
         let index = context
             .stream_manager
-            .playing_streams
+            .active_streams
             .iter()
             .position(|x| *x == stream);
         if let Some(index) = index {
-            context.stream_manager.playing_streams.remove(index);
+            context.stream_manager.active_streams.remove(index);
         }
     }
 
-    pub fn toggle_paused(context: &mut UpdateContext<'_, 'gc>, stream: NetStream<'gc>) {
-        let index = context
-            .stream_manager
-            .playing_streams
-            .iter()
-            .position(|x| *x == stream);
-        if let Some(index) = index {
-            context.stream_manager.playing_streams.remove(index);
-        } else {
-            context.stream_manager.playing_streams.push(stream);
-        }
-    }
-
-    /// Process all playing media streams.
+    /// Process all active media streams.
     ///
     /// This is an unlocked timestep; the `dt` parameter indicates how many
     /// milliseconds have elapsed since the last tick. This is intended to
@@ -127,7 +126,7 @@ impl<'gc> StreamManager<'gc> {
     ///
     /// This does not borrow `&mut self` as we need the `UpdateContext`, too.
     pub fn tick(context: &mut UpdateContext<'_, 'gc>, dt: f64) {
-        let streams = context.stream_manager.playing_streams.clone();
+        let streams = context.stream_manager.active_streams.clone();
         for stream in streams {
             stream.tick(context, dt)
         }
@@ -204,8 +203,13 @@ pub struct NetStreamData<'gc> {
     #[collect(require_static)]
     stream_type: Option<NetStreamType>,
 
-    /// The current seek offset in the stream.
+    /// The current seek offset in the stream in milliseconds.
     stream_time: f64,
+
+    /// The next queued seek offset in milliseconds.
+    ///
+    /// Seeks are only executed on the next stream tick.
+    queued_seek_time: Option<f64>,
 
     /// The last decoded bitmap.
     ///
@@ -234,6 +238,9 @@ pub struct NetStreamData<'gc> {
 
     /// The MovieClip this `NetStream` is attached to.
     attached_to: Option<MovieClip<'gc>>,
+
+    /// True if the stream should play when ticked.
+    playing: bool,
 }
 
 impl<'gc> NetStream<'gc> {
@@ -248,6 +255,7 @@ impl<'gc> NetStream<'gc> {
                 preload_offset: 0,
                 stream_type: None,
                 stream_time: 0.0,
+                queued_seek_time: None,
                 last_decoded_bitmap: None,
                 avm_object,
                 avm2_client: None,
@@ -255,6 +263,7 @@ impl<'gc> NetStream<'gc> {
                 audio_stream: None,
                 sound_instance: None,
                 attached_to: None,
+                playing: false,
             },
         ))
     }
@@ -296,6 +305,7 @@ impl<'gc> NetStream<'gc> {
         write.preload_offset = 0;
         write.stream_type = None;
         write.stream_time = 0.0;
+        write.queued_seek_time = None;
         write.audio_stream = None;
         write.sound_instance = None;
     }
@@ -315,7 +325,7 @@ impl<'gc> NetStream<'gc> {
         // NOTE: The onMetaData event triggers before this event in Flash due to its streaming behavior.
         self.trigger_status_event(
             context,
-            &[("code", "NetStream.Buffer.Full"), ("level", "status")],
+            vec![("code", "NetStream.Buffer.Full"), ("level", "status")],
         );
     }
 
@@ -329,6 +339,153 @@ impl<'gc> NetStream<'gc> {
 
     pub fn bytes_total(self) -> usize {
         self.0.read().buffer.len()
+    }
+
+    pub fn time(self) -> f64 {
+        self.0.read().stream_time
+    }
+
+    /// Queue a seek to be executed on the next frame tick.
+    ///
+    /// `offset` is in milliseconds.
+    pub fn seek(self, context: &mut UpdateContext<'_, 'gc>, offset: f64, notify: bool) {
+        self.0.write(context.gc_context).queued_seek_time = Some(offset);
+        StreamManager::activate(context, self);
+
+        if notify {
+            let trigger = AvmString::new_utf8(
+                context.gc_context,
+                format!("Start Seeking {}", offset as u64),
+            );
+            self.trigger_status_event(
+                context,
+                vec![
+                    ("description", trigger),
+                    ("level", "status".into()),
+                    ("code", "NetStream.SeekStart.Notify".into()),
+                ],
+            );
+        }
+    }
+
+    /// Seek to a new position in the stream.
+    ///
+    /// All existing audio will be paused. The stream offset will be snapped to
+    /// either the prior or next keyframe depending on seek direction. If the
+    /// stream is playing then new tag processing will occur when the stream
+    /// ticks next.
+    ///
+    /// This always does an in-buffer seek. Seek-driven requests are not
+    /// currently supported. When progressive download is implemented this seek
+    /// algorithm will need to detect out-of-buffer seeks and trigger fresh
+    /// downloads.
+    ///
+    /// `offset` is in milliseconds.
+    ///
+    /// This function should be run during stream ticks and *not* called by AVM
+    /// code to service seek requests.
+    pub fn execute_seek(self, context: &mut UpdateContext<'_, 'gc>, offset: f64) {
+        #![allow(clippy::explicit_auto_deref)] //Erroneous lint
+
+        self.trigger_status_event(
+            context,
+            vec![("code", "NetStream.Seek.Notify"), ("level", "status")],
+        );
+
+        // Ensure the container stream type is known before continuing.
+        if self.0.read().stream_type.is_none() && !self.sniff_stream_type(context) {
+            return;
+        }
+
+        let mut write = self.0.write(context.gc_context);
+
+        if let Some(sound) = write.sound_instance {
+            context.stop_sounds_with_handle(sound);
+            context.audio.stop_sound(sound);
+
+            write.sound_instance = None;
+            write.audio_stream = None;
+        }
+
+        if matches!(write.stream_type, Some(NetStreamType::Flv { .. })) {
+            let slice = write.buffer.to_full_slice();
+            let buffer = slice.data();
+            let mut reader = FlvReader::from_parts(&*buffer, write.offset);
+            let skipping_back = write.stream_time > offset;
+
+            loop {
+                if skipping_back {
+                    let res = FlvTag::skip_back(&mut reader);
+                    if matches!(res, Err(FlvError::EndOfData)) {
+                        //At start of video, can't skip further back
+                        break;
+                    }
+
+                    if let Err(e) = res {
+                        tracing::error!("FLV tag parsing failed during seek backward: {}", e);
+                        break;
+                    }
+                }
+
+                let old_position = reader
+                    .stream_position()
+                    .expect("valid stream position when seeking");
+
+                let tag = FlvTag::parse(&mut reader);
+                if matches!(tag, Err(FlvError::EndOfData)) {
+                    //At end of video, can't skip further forward
+                    break;
+                }
+
+                if let Err(e) = tag {
+                    tracing::error!("FLV tag parsing failed during seek forward: {}", e);
+                    break;
+                }
+
+                if skipping_back {
+                    //Tag position won't actually move backwards if we don't do this.
+                    reader
+                        .seek(SeekFrom::Start(old_position))
+                        .expect("valid backseek position");
+                }
+
+                let tag = tag.unwrap();
+                write.stream_time = tag.timestamp as f64;
+
+                if skipping_back && write.stream_time > offset
+                    || !skipping_back && write.stream_time < offset
+                {
+                    continue;
+                }
+
+                match tag.data {
+                    FlvTagData::Video(FlvVideoData {
+                        frame_type: FlvFrameType::Keyframe,
+                        ..
+                    }) => {
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+
+            write.offset = reader
+                .stream_position()
+                .expect("FLV reader stream position") as usize;
+        }
+
+        drop(write);
+
+        if context.is_action_script_3() {
+            self.trigger_status_event(
+                context,
+                vec![
+                    ("description", "Seek Complete -1"),
+                    ("level", "status"),
+                    ("code", "NetStream.Seek.Complete"),
+                ],
+            );
+        }
     }
 
     /// Start playing media from this NetStream.
@@ -355,27 +512,47 @@ impl<'gc> NetStream<'gc> {
             context.navigator.spawn_future(future);
         }
 
-        StreamManager::ensure_playing(context, self);
+        self.0.write(context.gc_context).playing = true;
+        StreamManager::activate(context, self);
 
         self.trigger_status_event(
             context,
-            &[("code", "NetStream.Play.Start"), ("level", "status")],
+            vec![("code", "NetStream.Play.Start"), ("level", "status")],
         );
     }
 
     /// Pause stream playback.
-    pub fn pause(self, context: &mut UpdateContext<'_, 'gc>) {
-        StreamManager::ensure_paused(context, self);
+    pub fn pause(self, context: &mut UpdateContext<'_, 'gc>, notify: bool) {
+        // NOTE: We do not deactivate the stream here as there may be other
+        // work to be done at tick time.
+        self.0.write(context.gc_context).playing = false;
+
+        if notify {
+            self.trigger_status_event(
+                context,
+                vec![
+                    ("description", "Pausing"),
+                    ("level", "status"),
+                    ("code", "NetStream.Pause.Notify"),
+                ],
+            );
+        }
     }
 
     /// Resume stream playback.
     pub fn resume(self, context: &mut UpdateContext<'_, 'gc>) {
-        StreamManager::ensure_playing(context, self);
+        self.0.write(context.gc_context).playing = true;
+        StreamManager::activate(context, self);
     }
 
     /// Resume stream playback if paused, pause otherwise.
     pub fn toggle_paused(self, context: &mut UpdateContext<'_, 'gc>) {
-        StreamManager::toggle_paused(context, self);
+        let mut write = self.0.write(context.gc_context);
+        write.playing = !write.playing;
+
+        if write.playing {
+            StreamManager::activate(context, self);
+        }
     }
 
     /// Indicates that this `NetStream`'s audio was detached from a `MovieClip` (AVM1)
@@ -561,6 +738,76 @@ impl<'gc> NetStream<'gc> {
         }
 
         Ok(())
+    }
+
+    /// Attempt to sniff the stream type from data in the buffer.
+    ///
+    /// Returns true if the stream type was successfully sniffed. False
+    /// indicates that there is either not enough data in the buffer, or the
+    /// data is of an unrecognized format. This should be used as a signal to
+    /// stop stream processing until new data has been retrieved.
+    pub fn sniff_stream_type(self, context: &mut UpdateContext<'_, 'gc>) -> bool {
+        #![allow(clippy::explicit_auto_deref)] //Erroneous lint
+        let mut write = self.0.write(context.gc_context);
+        let slice = write.buffer.to_full_slice();
+        let buffer = slice.data();
+
+        // A nonzero preload offset indicates that we tried and failed to
+        // sniff the container format, so in that case do not process the
+        // stream anymore.
+        if write.preload_offset > 0 {
+            return false;
+        }
+
+        match buffer.get(0..3) {
+            Some([0x46, 0x4C, 0x56]) => {
+                let mut reader = FlvReader::from_parts(&*buffer, write.offset);
+                match FlvHeader::parse(&mut reader) {
+                    Ok(header) => {
+                        write.offset = reader.into_parts().1;
+                        write.preload_offset = write.offset;
+                        write.stream_type = Some(NetStreamType::Flv {
+                            header,
+                            video_stream: None,
+                            frame_id: 0,
+                        });
+                        true
+                    }
+                    Err(FlvError::EndOfData) => false,
+                    Err(e) => {
+                        //TODO: Fire an error event to AS & stop playing too
+                        tracing::error!("FLV header parsing failed: {}", e);
+                        write.preload_offset = 3;
+                        false
+                    }
+                }
+            }
+            Some(magic) => {
+                //Unrecognized signature
+                //TODO: Fire an error event to AS & stop playing too
+                tracing::error!("Unrecognized file signature: {:?}", magic);
+                write.preload_offset = 3;
+                if let Some(url) = &write.url {
+                    if url.is_empty() {
+                        return false;
+                    }
+                    let parsed_url = match context.navigator.resolve_url(url) {
+                        Ok(parsed_url) => parsed_url,
+                        Err(e) => {
+                            tracing::error!(
+                                "Could not parse URL because of {}, the corrupt URL was: {}",
+                                e,
+                                url
+                            );
+                            return false;
+                        }
+                    };
+                    context.ui.display_unsupported_video(parsed_url);
+                }
+                false
+            }
+            None => false, //Data not yet loaded
+        }
     }
 
     /// Process a parsed FLV video tag.
@@ -797,72 +1044,33 @@ impl<'gc> NetStream<'gc> {
         }
     }
 
+    /// Process stream data.
+    ///
+    /// `dt` is in milliseconds.
     pub fn tick(self, context: &mut UpdateContext<'_, 'gc>, dt: f64) {
         #![allow(clippy::explicit_auto_deref)] //Erroneous lint
+
+        let seek_offset = self.0.write(context.gc_context).queued_seek_time.take();
+        if let Some(offset) = seek_offset {
+            self.execute_seek(context, offset);
+        }
+
+        // Paused streams deactivate themselves after seek processing.
+        if !self.0.read().playing {
+            StreamManager::deactivate(context, self);
+            return;
+        }
+
+        // Ensure the container stream type is known before continuing.
+        if self.0.read().stream_type.is_none() && !self.sniff_stream_type(context) {
+            return;
+        }
+
         let mut write = self.0.write(context.gc_context);
 
         self.cleanup_sound_stream(context, &mut write);
         let slice = write.buffer.to_full_slice();
         let buffer = slice.data();
-
-        // First, try to sniff the stream's container format from headers.
-        if write.stream_type.is_none() {
-            // A nonzero preload offset indicates that we tried and failed to
-            // sniff the container format, so in that case do not process the
-            // stream anymore.
-            if write.preload_offset > 0 {
-                return;
-            }
-
-            match buffer.get(0..3) {
-                Some([0x46, 0x4C, 0x56]) => {
-                    let mut reader = FlvReader::from_parts(&*buffer, write.offset);
-                    match FlvHeader::parse(&mut reader) {
-                        Ok(header) => {
-                            write.offset = reader.into_parts().1;
-                            write.preload_offset = write.offset;
-                            write.stream_type = Some(NetStreamType::Flv {
-                                header,
-                                video_stream: None,
-                                frame_id: 0,
-                            });
-                        }
-                        Err(FlvError::EndOfData) => return,
-                        Err(e) => {
-                            //TODO: Fire an error event to AS & stop playing too
-                            tracing::error!("FLV header parsing failed: {}", e);
-                            write.preload_offset = 3;
-                            return;
-                        }
-                    }
-                }
-                Some(magic) => {
-                    //Unrecognized signature
-                    //TODO: Fire an error event to AS & stop playing too
-                    tracing::error!("Unrecognized file signature: {:?}", magic);
-                    write.preload_offset = 3;
-                    if let Some(url) = &write.url {
-                        if url.is_empty() {
-                            return;
-                        }
-                        let parsed_url = match context.navigator.resolve_url(url) {
-                            Ok(parsed_url) => parsed_url,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Could not parse URL because of {}, the corrupt URL was: {}",
-                                    e,
-                                    url
-                                );
-                                return;
-                            }
-                        };
-                        context.ui.display_unsupported_video(parsed_url);
-                    }
-                    return;
-                }
-                None => return, //Data not yet loaded
-            }
-        }
 
         let end_time = write.stream_time + dt;
         let mut end_of_video = false;
@@ -894,7 +1102,7 @@ impl<'gc> NetStream<'gc> {
                 }
 
                 let tag = tag.expect("valid tag");
-                is_lookahead_tag = tag.timestamp as f64 >= end_time;
+                is_lookahead_tag = tag.timestamp as f64 >= end_time; //FLV timestamps are also ms
                 if is_lookahead_tag && max_lookahead_audio_tags == 0 {
                     break;
                 }
@@ -952,22 +1160,22 @@ impl<'gc> NetStream<'gc> {
         if end_of_video {
             self.trigger_status_event(
                 context,
-                &[("code", "NetStream.Buffer.Flush"), ("level", "status")],
+                vec![("code", "NetStream.Buffer.Flush"), ("level", "status")],
             );
             self.trigger_status_event(
                 context,
-                &[("code", "NetStream.Play.Stop"), ("level", "status")],
+                vec![("code", "NetStream.Play.Stop"), ("level", "status")],
             );
             self.trigger_status_event(
                 context,
-                &[("code", "NetStream.Buffer.Empty"), ("level", "status")],
+                vec![("code", "NetStream.Buffer.Empty"), ("level", "status")],
             );
-            self.pause(context);
+            self.pause(context, false);
         }
 
         if error {
             //TODO: Fire an error event at AS.
-            self.pause(context);
+            self.pause(context, false);
         }
     }
 
@@ -979,7 +1187,7 @@ impl<'gc> NetStream<'gc> {
     pub fn trigger_status_event(
         self,
         context: &mut UpdateContext<'_, 'gc>,
-        values: &[(&'static str, &'static str)],
+        values: Vec<(impl Into<AvmString<'gc>>, impl Into<AvmString<'gc>>)>,
     ) {
         let object = self.0.read().avm_object;
         match object {
@@ -996,11 +1204,7 @@ impl<'gc> NetStream<'gc> {
 
                 for (key, value) in values {
                     info_object
-                        .set(
-                            AvmString::from(*key),
-                            Avm1Value::String(AvmString::from(*value)),
-                            &mut activation,
-                        )
+                        .set(key.into(), Avm1Value::String(value.into()), &mut activation)
                         .expect("valid set");
                 }
 
