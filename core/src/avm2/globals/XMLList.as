@@ -17,12 +17,13 @@ package {
         AS3 native function copy():XMLList;
         AS3 native function attribute(name:*):XMLList;
         AS3 native function attributes():XMLList;
-        AS3 native function descendants(name:Object = "*"):XMLList;
+        AS3 native function descendants(name:* = "*"):XMLList;
         AS3 native function text():XMLList;
         AS3 native function toXMLString():String;
         AS3 native function toString():String;
         AS3 native function comments():XMLList;
-        AS3 native function processingInstructions(name:String = "*"):XMLList;
+        AS3 native function parent():*;
+        AS3 native function processingInstructions(name:* = "*"):XMLList;
 
         // The following native methods are not declared in the documentation,
         // but still exist
@@ -56,7 +57,7 @@ package {
         }
 
         prototype.child = function(name:Object):XMLList {
-            var self:XML = this;
+            var self:XMLList = this;
             return self.AS3::child(name);
         };
 
@@ -95,7 +96,7 @@ package {
             return self.AS3::name();
         }
 
-        prototype.descendants = function(name:Object):XMLList {
+        prototype.descendants = function(name:* = "*"):XMLList {
             var self:XMLList = this;
             return self.AS3::descendants(name);
         }
@@ -106,16 +107,21 @@ package {
         }
 
         prototype.comments = function():XMLList {
-            var self:XML = this;
+            var self:XMLList = this;
             return self.AS3::comments();
+        }
+
+        prototype.parent = function():* {
+            var self:XMLList = this;
+            return self.AS3::parent();
         }
 
         prototype.toJSON = function(k:String):* {
             return "XMLList";
         };
 
-        prototype.processingInstructions = function(name:String = "*"):XMLList {
-            var self:XML = this;
+        prototype.processingInstructions = function(name:* = "*"):XMLList {
+            var self:XMLList = this;
             return self.AS3::processingInstructions(name);
         }
 

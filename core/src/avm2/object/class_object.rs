@@ -2,7 +2,7 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::class::{Allocator, AllocatorFn, Class, ClassHashWrapper};
-use crate::avm2::error::{make_error_1127, type_error};
+use crate::avm2::error::{argument_error, make_error_1127, reference_error, type_error};
 use crate::avm2::function::Executable;
 use crate::avm2::method::Method;
 use crate::avm2::object::function_object::FunctionObject;
@@ -149,7 +149,11 @@ impl<'gc> ClassObject<'gc> {
         let class_class = activation.avm2().classes().class;
         let class_class_proto = class_class.prototype();
 
-        class_object.link_type(activation, class_class_proto, class_class);
+        class_object.link_type(
+            activation.context.gc_context,
+            class_class_proto,
+            class_class,
+        );
         class_object.init_instance_vtable(activation)?;
         class_object.into_finished_class(activation)
     }
@@ -409,13 +413,13 @@ impl<'gc> ClassObject<'gc> {
     /// and type object from the `Avm2` instance.
     pub fn link_type(
         self,
-        activation: &mut Activation<'_, 'gc>,
+        gc_context: &Mutation<'gc>,
         proto: Object<'gc>,
         instance_of: ClassObject<'gc>,
     ) {
         let instance_vtable = instance_of.instance_vtable();
 
-        let mut write = self.0.write(activation.context.gc_context);
+        let mut write = self.0.write(gc_context);
 
         write.base.set_instance_of(instance_of, instance_vtable);
         write.base.set_proto(proto);
@@ -495,7 +499,7 @@ impl<'gc> ClassObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         let scope = self.0.read().instance_scope;
         let constructor =
-            Executable::from_method(self.0.read().constructor.clone(), scope, None, Some(self));
+            Executable::from_method(self.0.read().constructor, scope, None, Some(self));
 
         constructor.exec(receiver, arguments, activation, self.into())
     }
@@ -512,12 +516,8 @@ impl<'gc> ClassObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let scope = self.0.read().instance_scope;
-        let constructor = Executable::from_method(
-            self.0.read().native_constructor.clone(),
-            scope,
-            None,
-            Some(self),
-        );
+        let constructor =
+            Executable::from_method(self.0.read().native_constructor, scope, None, Some(self));
 
         constructor.exec(receiver, arguments, activation, self.into())
     }
@@ -555,12 +555,23 @@ impl<'gc> ClassObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         let property = self.instance_vtable().get_trait(multiname);
         if property.is_none() {
-            return Err(format!(
-                "Attempted to supercall method {:?}, which does not exist",
-                multiname.local_name()
-            )
-            .into());
+            let qualified_multiname_name = multiname.as_uri(activation.context.gc_context);
+            let qualified_class_name = self
+                .inner_class_definition()
+                .read()
+                .name()
+                .to_qualified_name_err_message(activation.context.gc_context);
+
+            return Err(Error::AvmError(reference_error(
+                activation,
+                &format!(
+                    "Error #1070: Method {} not found on {}",
+                    qualified_multiname_name, qualified_class_name
+                ),
+                1070,
+            )?));
         }
+
         if let Some(Property::Method { disp_id, .. }) = property {
             // todo: handle errors
             let ClassBoundMethod {
@@ -722,14 +733,11 @@ impl<'gc> ClassObject<'gc> {
 
     pub fn add_application(
         &self,
-        activation: &mut Activation<'_, 'gc>,
+        gc_context: &Mutation<'gc>,
         param: Option<ClassObject<'gc>>,
         cls: ClassObject<'gc>,
     ) {
-        self.0
-            .write(activation.context.gc_context)
-            .applications
-            .insert(param, cls);
+        self.0.write(gc_context).applications.insert(param, cls);
     }
 
     pub fn translation_unit(self) -> Option<TranslationUnit<'gc>> {
@@ -741,7 +749,7 @@ impl<'gc> ClassObject<'gc> {
     }
 
     pub fn constructor(self) -> Method<'gc> {
-        self.0.read().constructor.clone()
+        self.0.read().constructor
     }
 
     pub fn instance_vtable(self) -> VTable<'gc> {
@@ -785,12 +793,8 @@ impl<'gc> ClassObject<'gc> {
         self.0.read().superclass_object
     }
 
-    pub fn set_param(
-        self,
-        activation: &mut Activation<'_, 'gc>,
-        param: Option<Option<ClassObject<'gc>>>,
-    ) {
-        self.0.write(activation.context.gc_context).params = param;
+    pub fn set_param(self, gc_context: &Mutation<'gc>, param: Option<Option<ClassObject<'gc>>>) {
+        self.0.write(gc_context).params = param;
     }
 
     pub fn as_class_params(self) -> Option<Option<ClassObject<'gc>>> {
@@ -858,17 +862,22 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
         arguments: &[Value<'gc>],
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if let Some(call_handler) = self.0.read().call_handler.clone() {
+        if let Some(call_handler) = self.0.read().call_handler {
             let scope = self.0.read().class_scope;
             let func = Executable::from_method(call_handler, scope, None, Some(self));
 
             func.exec(receiver, arguments, activation, self.into())
+        } else if arguments.len() == 1 {
+            arguments[0].coerce_to_type(activation, self.inner_class_definition())
         } else {
-            arguments
-                .get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_type(activation, self.inner_class_definition())
+            Err(Error::AvmError(argument_error(
+                activation,
+                &format!(
+                    "Error #1112: Argument count mismatch on class coercion.  Expected 1, got {}.",
+                    arguments.len()
+                ),
+                1112,
+            )?))
         }
     }
 

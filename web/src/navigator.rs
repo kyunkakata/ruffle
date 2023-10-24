@@ -1,5 +1,8 @@
 //! Navigator backend for web
+use crate::SocketProxy;
 use async_channel::Receiver;
+use futures_util::{SinkExt, StreamExt};
+use gloo_net::websocket::{futures::WebSocket, Message};
 use js_sys::{Array, ArrayBuffer, Uint8Array};
 use ruffle_core::backend::navigator::{
     async_return, create_fetch_error, create_specific_fetch_error, ErrorResponse, NavigationMethod,
@@ -30,6 +33,7 @@ pub struct WebNavigatorBackend {
     upgrade_to_https: bool,
     base_url: Option<Url>,
     open_url_mode: OpenURLMode,
+    socket_proxies: Vec<SocketProxy>,
 }
 
 impl WebNavigatorBackend {
@@ -40,6 +44,7 @@ impl WebNavigatorBackend {
         base_url: Option<String>,
         log_subscriber: Arc<Layered<WASMLayer, Registry>>,
         open_url_mode: OpenURLMode,
+        socket_proxies: Vec<SocketProxy>,
     ) -> Self {
         let window = web_sys::window().expect("window()");
 
@@ -81,6 +86,7 @@ impl WebNavigatorBackend {
             base_url,
             log_subscriber,
             open_url_mode,
+            socket_proxies,
         }
     }
 }
@@ -362,16 +368,77 @@ impl NavigatorBackend for WebNavigatorBackend {
 
     fn connect_socket(
         &mut self,
-        _host: String,
-        _port: u16,
+        host: String,
+        port: u16,
+        // NOTE: WebSocket does not allow specifying a timeout, so this goes unused.
         _timeout: Duration,
         handle: SocketHandle,
-        _receiver: Receiver<Vec<u8>>,
+        receiver: Receiver<Vec<u8>>,
         sender: Sender<SocketAction>,
     ) {
-        // FIXME: Add way to call out to JS code.
+        let Some(proxy) = self
+            .socket_proxies
+            .iter()
+            .find(|x| x.host == host && x.port == port)
+        else {
+            tracing::warn!("Missing WebSocket proxy for host {}, port {}", host, port);
+            sender
+                .send(SocketAction::Connect(handle, ConnectionState::Failed))
+                .expect("working channel send");
+            return;
+        };
+
+        tracing::info!("Connecting to {}", proxy.proxy_url);
+
+        let ws = match WebSocket::open(&proxy.proxy_url) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!("Failed to create WebSocket, reason {:?}", e);
+                sender
+                    .send(SocketAction::Connect(handle, ConnectionState::Failed))
+                    .expect("working channel send");
+                return;
+            }
+        };
+
+        let (mut sink, mut stream) = ws.split();
         sender
-            .send(SocketAction::Connect(handle, ConnectionState::Failed))
+            .send(SocketAction::Connect(handle, ConnectionState::Connected))
             .expect("working channel send");
+
+        // Spawn future to handle incoming messages.
+        let stream_sender = sender.clone();
+        self.spawn_future(Box::pin(async move {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(Message::Bytes(buf)) => stream_sender
+                        .send(SocketAction::Data(handle, buf))
+                        .expect("working channel send"),
+                    Ok(_) => tracing::warn!("Server sent unexpected text message"),
+                    Err(_) => {
+                        stream_sender
+                            .send(SocketAction::Close(handle))
+                            .expect("working channel send");
+                        return Ok(());
+                    }
+                }
+            }
+
+            Ok(())
+        }));
+
+        // Spawn future to handle outgoing messages.
+        self.spawn_future(Box::pin(async move {
+            while let Ok(msg) = receiver.recv().await {
+                if let Err(e) = sink.send(Message::Bytes(msg)).await {
+                    tracing::warn!("Failed to send message to WebSocket {}", e);
+                    sender
+                        .send(SocketAction::Close(handle))
+                        .expect("working channel send");
+                }
+            }
+
+            Ok(())
+        }));
     }
 }

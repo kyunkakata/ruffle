@@ -7,8 +7,21 @@ use ruffle_render::backend::{RenderBackend, ShapeHandle};
 use ruffle_render::transform::Transform;
 use std::cell::RefCell;
 use std::cmp::max;
+use std::hash::{Hash, Hasher};
 
 pub use swf::TextGridFit;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum DefaultFont {
+    /// `_sans`, a Sans-Serif font (similar to Helvetica or Arial)
+    Sans,
+
+    /// `_serif`, a Serif font (similar to Times Roman)
+    Serif,
+
+    /// `_typewriter`, a Monospace font (similar to Courier)
+    Typewriter,
+}
 
 /// Certain Flash routines measure text by rounding down to the nearest whole pixel.
 pub fn round_down_to_pixel(t: Twips) -> Twips {
@@ -544,21 +557,47 @@ impl Glyph {
 }
 
 /// Structure which identifies a particular font by name and properties.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Collect)]
+#[derive(Debug, Clone, Ord, PartialOrd, Collect)]
 #[collect(require_static)]
 pub struct FontDescriptor {
+    /// The name of the font.
+    /// This is set by the author of the SWF and does not correlate to any opentype names.
     name: String,
+
+    // All name comparisons ignore case, so this is for easy comparisons.
+    lowercase_name: String,
+
     is_bold: bool,
     is_italic: bool,
+}
+
+impl PartialEq for FontDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.lowercase_name == other.lowercase_name
+            && self.is_italic == other.is_italic
+            && self.is_bold == other.is_bold
+    }
+}
+
+impl Eq for FontDescriptor {}
+
+impl Hash for FontDescriptor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.lowercase_name.hash(state);
+        self.is_bold.hash(state);
+        self.is_italic.hash(state);
+    }
 }
 
 impl FontDescriptor {
     /// Obtain a font descriptor from a SWF font tag.
     pub fn from_swf_tag(val: &swf::Font, encoding: &'static swf::Encoding) -> Self {
         let name = val.name.to_string_lossy(encoding);
+        let lowercase_name = name.to_lowercase();
 
         Self {
             name,
+            lowercase_name,
             is_bold: val.flags.contains(swf::FontFlag::IS_BOLD),
             is_italic: val.flags.contains(swf::FontFlag::IS_ITALIC),
         }
@@ -571,16 +610,18 @@ impl FontDescriptor {
         if let Some(first_null) = name.find('\0') {
             name.truncate(first_null);
         };
+        let lowercase_name = name.to_lowercase();
 
         Self {
             name,
+            lowercase_name,
             is_bold,
             is_italic,
         }
     }
 
-    /// Get the name of the font class this descriptor references.
-    pub fn class(&self) -> &str {
+    /// Get the name of the font this descriptor identifies.
+    pub fn name(&self) -> &str {
         &self.name
     }
 
@@ -778,11 +819,12 @@ impl Default for TextRenderSettings {
 #[cfg(test)]
 mod tests {
     use crate::font::{EvalParameters, Font};
-    use crate::player::Player;
     use crate::string::WStr;
     use gc_arena::{rootless_arena, Mutation};
     use ruffle_render::backend::{null::NullRenderer, ViewportDimensions};
     use swf::Twips;
+
+    const DEVICE_FONT_TAG: &[u8] = include_bytes!("../assets/noto-sans-definefont3.bin");
 
     fn with_device_font<F>(callback: F)
     where
@@ -794,7 +836,15 @@ mod tests {
                 height: 0,
                 scale_factor: 1.0,
             });
-            let device_font = Player::load_device_font(mc, &mut renderer);
+            let mut reader = swf::read::Reader::new(DEVICE_FONT_TAG, 8);
+            let device_font = Font::from_swf_tag(
+                mc,
+                &mut renderer,
+                reader
+                    .read_define_font_2(3)
+                    .expect("Built-in font should compile"),
+                reader.encoding(),
+            );
 
             callback(mc, device_font);
         })

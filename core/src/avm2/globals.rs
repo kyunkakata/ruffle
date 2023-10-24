@@ -1,8 +1,7 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{ClassObject, FunctionObject, Object, ScriptObject, TObject};
+use crate::avm2::object::{ClassObject, Object, ScriptObject, TObject};
 use crate::avm2::scope::{Scope, ScopeChain};
 use crate::avm2::script::Script;
 use crate::avm2::Avm2;
@@ -15,6 +14,7 @@ use gc_arena::{Collect, GcCell, Mutation};
 use std::sync::Arc;
 use swf::TagCode;
 
+mod __ruffle__;
 mod array;
 mod avmplus;
 mod boolean;
@@ -39,6 +39,19 @@ mod vector;
 mod void;
 mod xml;
 mod xml_list;
+
+pub use toplevel::decode_uri;
+pub use toplevel::decode_uri_component;
+pub use toplevel::encode_uri;
+pub use toplevel::encode_uri_component;
+pub use toplevel::escape;
+pub use toplevel::is_finite;
+pub use toplevel::is_na_n;
+pub use toplevel::is_xml_name;
+pub use toplevel::parse_float;
+pub use toplevel::parse_int;
+pub use toplevel::trace;
+pub use toplevel::unescape;
 
 /// This structure represents all system builtin classes.
 #[derive(Clone, Collect)]
@@ -282,27 +295,30 @@ impl<'gc> SystemClasses<'gc> {
     }
 }
 
-/// Add a free-function builtin to the global scope.
-fn function<'gc>(
+/// Looks up a function defined in the script domain, and defines it on the global object.
+///
+/// This expects the looked-up value to be a function.
+fn define_fn_on_global<'gc>(
     activation: &mut Activation<'_, 'gc>,
     package: impl Into<AvmString<'gc>>,
     name: &'static str,
-    nf: NativeMethodImpl,
     script: Script<'gc>,
-) -> Result<(), Error<'gc>> {
-    let (_, global, mut domain) = script.init();
-    let mc = activation.context.gc_context;
-    let scope = activation.create_scopechain();
+) {
+    let (_, global, domain) = script.init();
     let qname = QName::new(
         Namespace::package(package, &mut activation.borrow_gc()),
         name,
     );
-    let method = Method::from_builtin(nf, name, mc);
-    let as3fn = FunctionObject::from_method(activation, method, scope, None, None).into();
-    domain.export_definition(qname, script, mc);
-    global.install_const_late(mc, qname, as3fn, activation.avm2().classes().function);
+    let func = domain
+        .get_defined_value(activation, qname)
+        .expect("Function being defined on global should be defined in domain!");
 
-    Ok(())
+    global.install_const_late(
+        activation.context.gc_context,
+        qname,
+        func,
+        activation.avm2().classes().function,
+    );
 }
 
 /// Add a fully-formed class object builtin to the global scope.
@@ -333,6 +349,7 @@ fn class<'gc>(
     script: Script<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<ClassObject<'gc>, Error<'gc>> {
+    let mc = activation.context.gc_context;
     let (_, global, mut domain) = script.init();
 
     let class_read = class_def.read();
@@ -345,10 +362,8 @@ fn class<'gc>(
             .ok_or_else(|| {
                 format!(
                     "Could not resolve superclass {} when defining global class {}",
-                    sc_name.to_qualified_name(activation.context.gc_context),
-                    class_read
-                        .name()
-                        .to_qualified_name(activation.context.gc_context)
+                    sc_name.to_qualified_name(mc),
+                    class_read.name().to_qualified_name(mc)
                 )
                 .into()
             });
@@ -366,13 +381,13 @@ fn class<'gc>(
 
     let class_object = ClassObject::from_class(activation, class_def, super_class)?;
     global.install_const_late(
-        activation.context.gc_context,
+        mc,
         class_name,
         class_object.into(),
         activation.avm2().classes().class,
     );
-    domain.export_definition(class_name, script, activation.context.gc_context);
-    domain.export_class(class_def, activation.context.gc_context);
+    domain.export_definition(class_name, script, mc);
+    domain.export_class(class_def, mc);
 
     Ok(class_object)
 }
@@ -392,10 +407,10 @@ fn vector_class<'gc>(
         script,
         activation,
     )?;
-    vector_cls.set_param(activation, Some(param_class));
+    vector_cls.set_param(mc, Some(param_class));
 
     let generic_vector = activation.avm2().classes().generic_vector;
-    generic_vector.add_application(activation, param_class, vector_cls);
+    generic_vector.add_application(mc, param_class, vector_cls);
     let generic_cls = generic_vector.inner_class_definition();
     generic_cls
         .write(mc)
@@ -433,7 +448,7 @@ pub fn load_player_globals<'gc>(
 ) -> Result<(), Error<'gc>> {
     let mc = activation.context.gc_context;
 
-    let globals = ScriptObject::custom_object(activation.context.gc_context, None, None);
+    let globals = ScriptObject::custom_object(mc, None, None);
     let gs = ScopeChain::new(domain).chain(mc, &[Scope::new(globals)]);
     let script = Script::empty_script(mc, globals, domain);
 
@@ -480,16 +495,16 @@ pub fn load_player_globals<'gc>(
 
     // Now to weave the Gordian knot...
     object_class.link_prototype(activation, object_proto)?;
-    object_class.link_type(activation, class_proto, class_class);
+    object_class.link_type(mc, class_proto, class_class);
 
     fn_class.link_prototype(activation, fn_proto)?;
-    fn_class.link_type(activation, class_proto, class_class);
+    fn_class.link_type(mc, class_proto, class_class);
 
     class_class.link_prototype(activation, class_proto)?;
-    class_class.link_type(activation, class_proto, class_class);
+    class_class.link_type(mc, class_proto, class_class);
 
     global_class.link_prototype(activation, global_proto)?;
-    global_class.link_type(activation, class_proto, class_class);
+    global_class.link_type(mc, class_proto, class_class);
 
     // At this point, we need at least a partial set of system classes in
     // order to continue initializing the player. The rest of the classes
@@ -526,7 +541,7 @@ pub fn load_player_globals<'gc>(
 
     globals.set_proto(mc, global_proto);
     globals.set_instance_of(mc, global_class);
-    globals.fork_vtable(activation.context.gc_context);
+    globals.fork_vtable(mc);
 
     activation.context.avm2.toplevel_global_object = Some(globals);
 
@@ -560,66 +575,6 @@ pub fn load_player_globals<'gc>(
     // TODO: this should _not_ be exposed as a ClassObject, getDefinitionByName etc.
     // it should only be visible as an type for typecheck/cast purposes.
     avm2_system_class!(void, activation, void::create_class(activation), script);
-
-    function(activation, "", "trace", toplevel::trace, script)?;
-    function(
-        activation,
-        "__ruffle__",
-        "log_warn",
-        toplevel::log_warn,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_method",
-        toplevel::stub_method,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_getter",
-        toplevel::stub_getter,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_setter",
-        toplevel::stub_setter,
-        script,
-    )?;
-    function(
-        activation,
-        "__ruffle__",
-        "stub_constructor",
-        toplevel::stub_constructor,
-        script,
-    )?;
-    function(activation, "", "isFinite", toplevel::is_finite, script)?;
-    function(activation, "", "isNaN", toplevel::is_nan, script)?;
-    function(activation, "", "isXMLName", toplevel::is_xml_name, script)?;
-    function(activation, "", "parseInt", toplevel::parse_int, script)?;
-    function(activation, "", "parseFloat", toplevel::parse_float, script)?;
-    function(activation, "", "escape", toplevel::escape, script)?;
-    function(activation, "", "encodeURI", toplevel::encode_uri, script)?;
-    function(
-        activation,
-        "",
-        "encodeURIComponent",
-        toplevel::encode_uri_component,
-        script,
-    )?;
-    function(activation, "", "decodeURI", toplevel::decode_uri, script)?;
-    function(
-        activation,
-        "",
-        "decodeURIComponent",
-        toplevel::decode_uri_component,
-        script,
-    )?;
-    function(activation, "", "unescape", toplevel::unescape, script)?;
 
     avm2_system_class!(
         generic_vector,
@@ -658,9 +613,23 @@ pub fn load_player_globals<'gc>(
 
     // Inside this call, the macro `avm2_system_classes_playerglobal`
     // triggers classloading. Therefore, we run `load_playerglobal`
-    // relative late, so that it can access classes defined before
+    // relatively late, so that it can access classes defined before
     // this call.
     load_playerglobal(activation, domain)?;
+
+    // Except for `trace`, top-level builtin functions are defined
+    // on the `global` object.
+    define_fn_on_global(activation, "", "decodeURI", script);
+    define_fn_on_global(activation, "", "decodeURIComponent", script);
+    define_fn_on_global(activation, "", "encodeURI", script);
+    define_fn_on_global(activation, "", "encodeURIComponent", script);
+    define_fn_on_global(activation, "", "escape", script);
+    define_fn_on_global(activation, "", "unescape", script);
+    define_fn_on_global(activation, "", "isXMLName", script);
+    define_fn_on_global(activation, "", "isFinite", script);
+    define_fn_on_global(activation, "", "isNaN", script);
+    define_fn_on_global(activation, "", "parseFloat", script);
+    define_fn_on_global(activation, "", "parseInt", script);
 
     Ok(())
 }

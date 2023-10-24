@@ -249,6 +249,25 @@ export const enum NetworkingAccessMode {
 }
 
 /**
+ * Represents a host, port and proxyUrl. Used when a SWF file tries to use a Socket.
+ */
+export interface SocketProxy {
+    /**
+     * Host used by the SWF.
+     */
+    host: string;
+    /**
+     * Port used by the SWF.
+     */
+    port: number;
+
+    /**
+     * The proxy URL to use when SWF file tries to connect to the specified host and port.
+     */
+    proxyUrl: string;
+}
+
+/**
  * Any options used for loading a movie.
  */
 export interface BaseLoadOptions {
@@ -528,6 +547,20 @@ export interface BaseLoadOptions {
      * @default null
      */
     openInNewTab?: ((swf: URL) => void) | null;
+
+    /**
+     * An array of SocketProxy objects.
+     *
+     * When a SWF tries to establish a Socket connection, Ruffle will search for
+     * a matching SocketProxy object in this array and use it to establish a WebSocket connection,
+     * through which all communication is tunneled through.
+     *
+     * When none are found, Ruffle will fail the connection gracefully.
+     * When multiple matching SocketProxy objects exist, the first one is used.
+     *
+     * @default []
+     */
+    socketProxy?: Array<SocketProxy>;
 }
 
 /**

@@ -1,3 +1,5 @@
+use ruffle_wstr::WString;
+
 use crate::avm2::object::TObject;
 use crate::avm2::Activation;
 use crate::avm2::AvmString;
@@ -6,7 +8,10 @@ use crate::avm2::Value;
 use std::fmt::Debug;
 use std::mem::size_of;
 
+use super::function::display_function;
+use super::method::Method;
 use super::ClassObject;
+use super::Object;
 
 /// An error generated while handling AVM2 logic
 pub enum Error<'gc> {
@@ -54,15 +59,8 @@ pub fn make_null_or_undefined_error<'gc>(
     name: Option<&Multiname<'gc>>,
 ) -> Error<'gc> {
     let class = activation.avm2().classes().typeerror;
-    let error = if matches!(value, Value::Undefined) {
-        let mut msg = "Error #1010: A term is undefined and has no properties.".to_string();
-        if let Some(name) = name {
-            msg.push_str(&format!(
-                " (accessing field: {})",
-                name.to_qualified_name(activation.context.gc_context)
-            ));
-        }
-        error_constructor(activation, class, &msg, 1010)
+    if matches!(value, Value::Undefined) {
+        make_error_1010(activation, name)
     } else {
         let mut msg = "Error #1009: Cannot access a property or method of a null object reference."
             .to_string();
@@ -72,11 +70,10 @@ pub fn make_null_or_undefined_error<'gc>(
                 name.to_qualified_name(activation.context.gc_context)
             ));
         }
-        error_constructor(activation, class, &msg, 1009)
-    };
-    match error {
-        Ok(err) => Error::AvmError(err),
-        Err(err) => err,
+        match error_constructor(activation, class, &msg, 1009) {
+            Ok(err) => Error::AvmError(err),
+            Err(err) => err,
+        }
     }
 }
 
@@ -183,6 +180,26 @@ pub fn make_error_1004<'gc>(activation: &mut Activation<'_, 'gc>, method_name: &
     match err {
         Ok(err) => Error::AvmError(err),
         Err(err) => err,
+    }
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_error_1010<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    name: Option<&Multiname<'gc>>,
+) -> Error<'gc> {
+    let mut msg = "Error #1010: A term is undefined and has no properties.".to_string();
+    if let Some(name) = name {
+        msg.push_str(&format!(
+            " (accessing field: {})",
+            name.to_qualified_name(activation.context.gc_context)
+        ));
+    }
+    let error = type_error(activation, &msg, 1010);
+    match error {
+        Ok(e) => Error::AvmError(e),
+        Err(e) => e,
     }
 }
 
@@ -428,6 +445,44 @@ pub fn error<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let class = activation.avm2().classes().error;
     error_constructor(activation, class, message, code)
+}
+
+#[inline(never)]
+#[cold]
+pub fn make_mismatch_error<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    method: Method<'gc>,
+    user_arguments: &[Value<'gc>],
+    callee: Option<Object<'gc>>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let expected_num_params = method
+        .signature()
+        .iter()
+        .filter(|param| param.default_value.is_none())
+        .count();
+
+    let mut function_name = WString::new();
+    let bound_superclass = callee.and_then(|callee| {
+        if let Some(cls) = callee.as_class_object() {
+            Some(cls)
+        } else {
+            callee
+                .as_function_object()
+                .and_then(|f| f.as_executable().and_then(|e| e.bound_superclass()))
+        }
+    });
+
+    display_function(&mut function_name, &method, bound_superclass);
+
+    return Err(Error::AvmError(argument_error(
+        activation,
+        &format!(
+            "Error #1063: Argument count mismatch on {function_name}. Expected {}, got {}.",
+            expected_num_params,
+            user_arguments.len(),
+        ),
+        1063,
+    )?));
 }
 
 fn error_constructor<'gc>(

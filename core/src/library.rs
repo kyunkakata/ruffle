@@ -13,6 +13,9 @@ use ruffle_render::backend::RenderBackend;
 use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::utils::remove_invalid_jpeg_data;
 
+use crate::backend::ui::{FontDefinition, UiBackend};
+use crate::DefaultFont;
+use fnv::{FnvHashMap, FnvHashSet};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use swf::CharacterId;
@@ -256,24 +259,88 @@ impl<'gc> MovieLibrary<'gc> {
     }
 
     /// Find a font by it's name and parameters.
-    pub fn get_font_by_name(
+    pub fn get_embedded_font_by_name(
         &self,
         name: &str,
         is_bold: bool,
         is_italic: bool,
     ) -> Option<Font<'gc>> {
-        let descriptor = FontDescriptor::from_parts(name, is_bold, is_italic);
-        if let Some(font) = self.fonts.get(&descriptor) {
+        // The order here is specific, and tested in `tests/swfs/fonts/embed_matching/fallback_preferences`
+
+        // Exact match
+        if let Some(font) = self
+            .fonts
+            .get(&FontDescriptor::from_parts(name, is_bold, is_italic))
+        {
             return Some(*font);
         }
-        // If we don't have a direct match, fallback to something with the same name
-        // [NA]TODO: This isn't *entirely* correct. I think we're storing fonts wrong.
-        // We might need to merge fonts as they're defined, and there should only be one font per name.
-        self.fonts
-            .iter()
-            .find(|(d, _)| d.class() == name)
-            .map(|(_, f)| f)
-            .copied()
+
+        if is_italic ^ is_bold {
+            // If one is set (but not both), then try upgrading to bold italic...
+            if let Some(font) = self
+                .fonts
+                .get(&FontDescriptor::from_parts(name, true, true))
+            {
+                return Some(*font);
+            }
+
+            // and then downgrading to regular
+            if let Some(font) = self
+                .fonts
+                .get(&FontDescriptor::from_parts(name, false, false))
+            {
+                return Some(*font);
+            }
+
+            // and then finally whichever one we don't have set
+            if let Some(font) = self
+                .fonts
+                .get(&FontDescriptor::from_parts(name, !is_bold, !is_italic))
+            {
+                return Some(*font);
+            }
+        } else {
+            // We don't have an exact match and we were either looking for regular or bold-italic
+
+            if is_italic && is_bold {
+                // Do we have regular? (unless we already looked for it)
+                if let Some(font) = self
+                    .fonts
+                    .get(&FontDescriptor::from_parts(name, false, false))
+                {
+                    return Some(*font);
+                }
+            }
+
+            // Do we have bold?
+            if let Some(font) = self
+                .fonts
+                .get(&FontDescriptor::from_parts(name, true, false))
+            {
+                return Some(*font);
+            }
+
+            // Do we have italic?
+            if let Some(font) = self
+                .fonts
+                .get(&FontDescriptor::from_parts(name, false, true))
+            {
+                return Some(*font);
+            }
+
+            if !is_bold && !is_italic {
+                // Do we have bold italic? (unless we already looked for it)
+                if let Some(font) = self
+                    .fonts
+                    .get(&FontDescriptor::from_parts(name, true, true))
+                {
+                    return Some(*font);
+                }
+            }
+        }
+
+        // If there's no match at all, then it should not show anything...
+        None
     }
 
     /// Returns the `Graphic` with the given character ID.
@@ -388,8 +455,19 @@ pub struct Library<'gc> {
     /// All the movie libraries.
     movie_libraries: PtrWeakKeyHashMap<Weak<SwfMovie>, MovieLibrary<'gc>>,
 
-    /// The embedded device font.
-    device_font: Option<Font<'gc>>,
+    /// A cache of seen device fonts.
+    // TODO: Descriptors shouldn't be stored in fonts. Fonts should be a list that we iterate and ask "do you match". A font can have zero or many names.
+    device_fonts: FnvHashMap<String, Font<'gc>>,
+
+    /// A set of which fonts we've asked from the backend already, to help with negative caching.
+    /// If we've asked for a specific font, record it here and don't ask again.
+    font_lookup_cache: FnvHashSet<String>,
+
+    /// The implementation names of each default font.
+    default_font_names: FnvHashMap<DefaultFont, Vec<String>>,
+
+    /// The cached list of implementations per default font.
+    default_font_cache: FnvHashMap<DefaultFont, Vec<Font<'gc>>>,
 
     /// A list of the symbols associated with specific AVM2 constructor
     /// prototypes.
@@ -402,7 +480,10 @@ unsafe impl<'gc> gc_arena::Collect for Library<'gc> {
         for (_, val) in self.movie_libraries.iter() {
             val.trace(cc);
         }
-        self.device_font.trace(cc);
+        for (_, val) in self.default_font_cache.iter() {
+            val.trace(cc);
+        }
+        self.device_fonts.trace(cc);
         self.avm2_class_registry.trace(cc);
     }
 }
@@ -411,7 +492,10 @@ impl<'gc> Library<'gc> {
     pub fn empty() -> Self {
         Self {
             movie_libraries: PtrWeakKeyHashMap::new(),
-            device_font: None,
+            device_fonts: Default::default(),
+            font_lookup_cache: Default::default(),
+            default_font_names: Default::default(),
+            default_font_cache: Default::default(),
             avm2_class_registry: Default::default(),
         }
     }
@@ -432,14 +516,87 @@ impl<'gc> Library<'gc> {
         self.movie_libraries.keys().collect()
     }
 
-    /// Returns the device font for use when a font is unavailable.
-    pub fn device_font(&self) -> Option<Font<'gc>> {
-        self.device_font
+    /// Returns the default Font implementations behind the built in names (ie `_sans`)
+    pub fn default_font(
+        &mut self,
+        name: DefaultFont,
+        ui: &dyn UiBackend,
+        renderer: &mut dyn RenderBackend,
+        gc_context: &Mutation<'gc>,
+    ) -> Vec<Font<'gc>> {
+        // Can't use entry api here as we want to use self for `load_device_font`.
+        // Cache the value as this will be looked up a lot, and font lookup by name can be expensive if lots of fonts exist.
+        if let Some(cache) = self.default_font_cache.get(&name) {
+            return cache.clone();
+        }
+
+        let mut result = vec![];
+        for name in self.default_font_names.entry(name).or_default().clone() {
+            if let Some(font) = self.get_or_load_device_font(&name, ui, renderer, gc_context) {
+                result.push(font);
+            }
+        }
+
+        self.default_font_cache.insert(name, result.clone());
+        result
     }
 
-    /// Sets the device font.
-    pub fn set_device_font(&mut self, font: Font<'gc>) {
-        self.device_font = Some(font);
+    /// Returns the device font for use when a font is unavailable.
+    pub fn get_or_load_device_font(
+        &mut self,
+        name: &str,
+        ui: &dyn UiBackend,
+        renderer: &mut dyn RenderBackend,
+        gc_context: &Mutation<'gc>,
+    ) -> Option<Font<'gc>> {
+        // If we have the font already, use that
+        // TODO: We should instead ask each font if it matches a given name. Partial matches are allowed, and fonts may have any amount of names.
+        if let Some(font) = self.device_fonts.get(name) {
+            return Some(*font);
+        }
+
+        // We don't have this font already. Did we ask for it before?
+        let new_request = self.font_lookup_cache.insert(name.to_string());
+        if new_request {
+            // First time asking for this font, see if our backend can provide anything relevant
+            ui.load_device_font(name, &|definition| {
+                self.register_device_font(gc_context, renderer, definition)
+            });
+        }
+
+        // Check again. A backend may or may not have provided some new fonts,
+        // and they may or may not be relevant to the one we're asking for.
+        match self.device_fonts.get(name) {
+            None => {
+                if new_request {
+                    warn!("Unknown device font \"{name}\"");
+                }
+                None
+            }
+            Some(font) => Some(*font),
+        }
+    }
+
+    pub fn set_default_font(&mut self, font: DefaultFont, names: Vec<String>) {
+        self.default_font_names.insert(font, names);
+        self.default_font_cache.clear();
+    }
+
+    pub fn register_device_font(
+        &mut self,
+        gc_context: &Mutation<'gc>,
+        renderer: &mut dyn RenderBackend,
+        definition: FontDefinition<'_>,
+    ) {
+        match definition {
+            FontDefinition::SwfTag(tag, encoding) => {
+                let font = Font::from_swf_tag(gc_context, renderer, tag, encoding);
+                let name = font.descriptor().name().to_owned();
+                info!("Loaded new device font \"{name}\" from swf tag");
+                self.device_fonts.insert(name, font);
+            }
+        }
+        self.default_font_cache.clear();
     }
 
     /// Get the AVM2 class registry.
