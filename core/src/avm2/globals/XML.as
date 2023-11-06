@@ -87,6 +87,7 @@ package {
         AS3 native function insertChildBefore(child1:Object, child2:Object):*;
         // NOTE: Docs lie, value can be anything not just XML.
         AS3 native function replace(propertyName:Object, value:*):XML;
+        AS3 native function setChildren(value:Object):XML;
 
         AS3 function valueOf():XML {
             return this;
@@ -95,6 +96,10 @@ package {
         AS3 function toJSON(k:String) : * {
             return this.toJSON(k);
         }
+
+        // undocumented functions
+        AS3 native function notification():Function;
+        AS3 native function setNotification(f:Function):*;
 
         public static var ignoreComments:Boolean = true;
         public static var ignoreProcessingInstructions:Boolean = true;
@@ -246,6 +251,11 @@ package {
         prototype.replace = function(propertyName:Object, value:*):XML {
             var self:XML = this;
             return self.AS3::replace(propertyName, value);
+        }
+
+        prototype.setChildren = function(value:Object):XML {
+            var self:XML = this;
+            return self.AS3::setChildren(value);
         }
 
         public static const length:int = 1;

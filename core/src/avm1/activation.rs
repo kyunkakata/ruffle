@@ -17,7 +17,6 @@ use crate::vminterface::Instantiator;
 use crate::{avm_error, avm_warn};
 use gc_arena::{Gc, GcCell, Mutation};
 use indexmap::IndexMap;
-use instant::Instant;
 use rand::Rng;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -27,6 +26,7 @@ use swf::avm1::read::Reader;
 use swf::avm1::types::*;
 use swf::extensions::ReadSwfExt;
 use url::form_urlencoded;
+use web_time::Instant;
 
 use super::object_reference::MovieClipReference;
 

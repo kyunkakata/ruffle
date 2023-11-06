@@ -10,6 +10,7 @@ mod ui;
 use generational_arena::{Arena, Index};
 use js_sys::{Array, Error as JsError, Function, Object, Promise, Uint8Array};
 use ruffle_core::backend::navigator::OpenURLMode;
+use ruffle_core::backend::ui::FontDefinition;
 use ruffle_core::compatibility_rules::CompatibilityRules;
 use ruffle_core::config::{Letterbox, NetworkingAccessMode};
 use ruffle_core::context::UpdateContext;
@@ -19,6 +20,7 @@ use ruffle_core::external::{
     Value,
 };
 use ruffle_core::tag_utils::SwfMovie;
+use ruffle_core::{swf, DefaultFont};
 use ruffle_core::{
     Color, Player, PlayerBuilder, PlayerEvent, SandboxType, StageAlign, StageScaleMode,
     StaticCallstack, ViewportDimensions,
@@ -458,6 +460,59 @@ impl Ruffle {
         // Remove instance from the active list.
         let _ = self.remove_instance();
         // Instance is dropped at this point.
+    }
+
+    pub fn add_font(&mut self, font_name: &str, data: Uint8Array) {
+        let _ = self.with_core_mut(|core| {
+            let bytes: Vec<u8> = data.to_vec();
+            if let Ok(swf_stream) = swf::decompress_swf(&bytes[..]) {
+                if let Ok(swf) = swf::parse_swf(&swf_stream) {
+                    let encoding = swf::SwfStr::encoding_for_version(swf.header.version());
+                    for tag in swf.tags {
+                        match tag {
+                            swf::Tag::DefineFont(_font) => {
+                                tracing::warn!("DefineFont1 tag is not yet supported by Ruffle, inside font swf {font_name}");
+                            }
+                            swf::Tag::DefineFont2(font) => {
+                                tracing::debug!(
+                                    "Loaded font {} from font swf {font_name}",
+                                    font.name.to_str_lossy(encoding)
+                                );
+                                core.register_device_font(FontDefinition::SwfTag(*font, encoding));
+                            }
+                            swf::Tag::DefineFont4(_font) => {
+                                tracing::warn!("DefineFont4 tag is not yet supported by Ruffle, inside font swf {font_name}");
+                            }
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+            }
+
+            tracing::warn!("Font source {font_name} was not recognised (not a valid SWF?)");
+        });
+    }
+
+    pub fn set_default_font(&mut self, default_name: &str, fonts: Vec<JsValue>) {
+        let _ = self.with_core_mut(|core| {
+            let default = match default_name {
+                "sans" => DefaultFont::Sans,
+                "serif" => DefaultFont::Serif,
+                "typewriter" => DefaultFont::Typewriter,
+                name => {
+                    tracing::error!("Unknown default font name '{name}'");
+                    return;
+                }
+            };
+            core.set_default_font(
+                default,
+                fonts
+                    .into_iter()
+                    .flat_map(|value| value.as_string())
+                    .collect(),
+            );
+        });
     }
 
     #[allow(clippy::boxed_local)] // for js_bind

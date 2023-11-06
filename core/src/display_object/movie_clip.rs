@@ -29,7 +29,7 @@ use crate::display_object::{
 };
 use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult};
-use crate::font::Font;
+use crate::font::{Font, FontType};
 use crate::limits::ExecutionLimit;
 use crate::loader;
 use crate::loader::Loader;
@@ -3804,6 +3804,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
+            FontType::Embedded,
         );
         context
             .library
@@ -3825,6 +3826,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
+            FontType::Embedded,
         );
         context
             .library
@@ -3846,6 +3848,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
             context.renderer,
             font,
             reader.encoding(),
+            FontType::Embedded,
         );
         context
             .library
@@ -3877,6 +3880,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
                 flags: FontFlag::empty(),
             },
             reader.encoding(),
+            FontType::EmbeddedCFF,
         );
         context
             .library

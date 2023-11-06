@@ -166,21 +166,26 @@ pub fn child<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let list = this.as_xml_list_object().unwrap();
+    let this = this.as_xml_list_object().unwrap();
     let multiname = name_to_multiname(activation, &args[0], false)?;
-    let children = list.children();
-    let mut sub_children = Vec::new();
-    for child in &*children {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
-            sub_children.extend(
-                children
-                    .iter()
-                    .filter(|node| node.matches_name(&multiname))
-                    .map(|node| E4XOrXml::E4X(*node)),
-            );
+    let mut children = this.children_mut(activation.gc());
+
+    // 1. Let m be a new XMLList with m.[[TargetObject]] = list
+    let list = XmlListObject::new(activation, Some(this.into()), None);
+
+    // 2. For i = 0 to list.[[Length]]-1
+    for child in &mut *children {
+        // 2.a. Let r = list[i].child(propertyName)
+        let child = child.get_or_create_xml(activation);
+        let r = child.child(&multiname, activation);
+        // 2.b. If r.[[Length]] > 0, call the [[Append]] method of m with argument r
+        if r.length() > 0 {
+            list.append(r.into(), activation.gc());
         }
     }
-    Ok(XmlListObject::new(activation, sub_children, Some(list.into()), None).into())
+
+    // 3. Return m
+    Ok(list.into())
 }
 
 pub fn children<'gc>(
@@ -197,7 +202,7 @@ pub fn children<'gc>(
         }
     }
     // FIXME: This method should just call get_property_local with "*".
-    Ok(XmlListObject::new(
+    Ok(XmlListObject::new_with_children(
         activation,
         sub_children,
         Some(list.into()),
@@ -240,7 +245,13 @@ pub fn attribute<'gc>(
     }
 
     // FIXME: This should just use get_property_local with an attribute Multiname.
-    Ok(XmlListObject::new(activation, sub_children, Some(list.into()), Some(multiname)).into())
+    Ok(XmlListObject::new_with_children(
+        activation,
+        sub_children,
+        Some(list.into()),
+        Some(multiname),
+    )
+    .into())
 }
 
 pub fn attributes<'gc>(
@@ -258,7 +269,7 @@ pub fn attributes<'gc>(
     }
 
     // FIXME: This should just use get_property_local with an any attribute Multiname.
-    Ok(XmlListObject::new(
+    Ok(XmlListObject::new_with_children(
         activation,
         child_attrs,
         Some(list.into()),
@@ -302,6 +313,7 @@ pub fn descendants<'gc>(
     }
 }
 
+// ECMA-357 13.5.4.20 XMLList.prototype.text ( )
 pub fn text<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -319,7 +331,9 @@ pub fn text<'gc>(
             );
         }
     }
-    Ok(XmlListObject::new(activation, nodes, Some(xml_list.into()), None).into())
+    // FIXME: This should call XmlObject's text() and concat everything together
+    //        (Necessary for correct target object/property and dirty flag).
+    Ok(XmlListObject::new_with_children(activation, nodes, Some(xml_list.into()), None).into())
 }
 
 pub fn comments<'gc>(
@@ -339,7 +353,10 @@ pub fn comments<'gc>(
             );
         }
     }
-    Ok(XmlListObject::new(activation, nodes, Some(xml_list.into()), None).into())
+
+    // FIXME: This should call XmlObject's comments() and concat everything together
+    //        (Necessary for correct target object/property and dirty flag).
+    Ok(XmlListObject::new_with_children(activation, nodes, Some(xml_list.into()), None).into())
 }
 
 // ECMA-357 13.5.4.17 XMLList.prototype.parent ( )
@@ -401,5 +418,7 @@ pub fn processing_instructions<'gc>(
         }
     }
 
-    Ok(XmlListObject::new(activation, nodes, Some(xml_list.into()), None).into())
+    // FIXME: This should call XmlObject's processing_instructions() and concat everything together
+    //        (Necessary for correct target object/property and dirty flag).
+    Ok(XmlListObject::new_with_children(activation, nodes, Some(xml_list.into()), None).into())
 }

@@ -14,7 +14,7 @@ use crate::{avm2::TObject, xml::custom_unescape};
 
 use super::{
     error::{make_error_1010, make_error_1118, type_error},
-    object::E4XOrXml,
+    object::{E4XOrXml, FunctionObject},
     string::AvmString,
     Activation, Error, Multiname, Value,
 };
@@ -38,6 +38,7 @@ pub struct E4XNodeData<'gc> {
     namespace: Option<AvmString<'gc>>,
     local_name: Option<AvmString<'gc>>,
     kind: E4XNodeKind<'gc>,
+    notification: Option<FunctionObject<'gc>>,
 }
 
 impl<'gc> Debug for E4XNodeData<'gc> {
@@ -124,6 +125,7 @@ impl<'gc> E4XNode<'gc> {
                     attributes: vec![],
                     children: vec![],
                 },
+                notification: None,
             },
         ))
     }
@@ -136,6 +138,7 @@ impl<'gc> E4XNode<'gc> {
                 namespace: None,
                 local_name: None,
                 kind: E4XNodeKind::Text(text),
+                notification: None,
             },
         ))
     }
@@ -156,6 +159,7 @@ impl<'gc> E4XNode<'gc> {
                     attributes: vec![],
                     children: vec![],
                 },
+                notification: None,
             },
         ))
     }
@@ -173,6 +177,7 @@ impl<'gc> E4XNode<'gc> {
                 namespace: None,
                 local_name: Some(name),
                 kind: E4XNodeKind::Attribute(value),
+                notification: None,
             },
         ))
     }
@@ -258,6 +263,7 @@ impl<'gc> E4XNode<'gc> {
                 namespace: this.namespace,
                 local_name: this.local_name,
                 kind,
+                notification: None,
             },
         ));
 
@@ -388,6 +394,24 @@ impl<'gc> E4XNode<'gc> {
         Ok(())
     }
 
+    pub fn child_index(&self) -> Option<usize> {
+        let parent = self.parent()?;
+
+        if let E4XNodeKind::Attribute(_) = &*self.kind() {
+            return None;
+        }
+
+        if let E4XNodeKind::Element { children, .. } = &*parent.kind() {
+            let index = children
+                .iter()
+                .position(|child| E4XNode::ptr_eq(*child, *self))
+                .unwrap();
+            return Some(index);
+        }
+
+        unreachable!("parent must be an element")
+    }
+
     // ECMA-357 9.1.1.4 [[DeleteByIndex]] (P)
     pub fn delete_by_index(&self, index: usize, activation: &mut Activation<'_, 'gc>) {
         let E4XNodeKind::Element { children, .. } = &mut *self.kind_mut(activation.gc()) else {
@@ -464,11 +488,11 @@ impl<'gc> E4XNode<'gc> {
         }
 
         // 5. If Type(V) is XML and V.[[Class]] ∈ {"element", "comment", "processing-instruction", "text"}
-        if let Some(xml) = value.as_object().and_then(|x| x.as_xml_object()) {
-            if matches!(*xml.node().kind(), E4XNodeKind::Attribute(_)) {
-                return Ok(());
-            }
-
+        if let Some(xml) = value
+            .as_object()
+            .and_then(|x| x.as_xml_object())
+            .filter(|x| !matches!(*x.node().kind(), E4XNodeKind::Attribute(_)))
+        {
             // 5.a. If V.[[Class]] is “element” and (V is x or an ancestor of x) throw an Error exception
             if matches!(*xml.node().kind(), E4XNodeKind::Element { .. })
                 && self.ancestors().any(|x| E4XNode::ptr_eq(x, *xml.node()))
@@ -633,6 +657,7 @@ impl<'gc> E4XNode<'gc> {
                         } else {
                             E4XNodeKind::CData(text)
                         },
+                        notification: None,
                     },
                 ));
                 push_childless_node(node, open_tags, top_level, activation)?;
@@ -705,6 +730,7 @@ impl<'gc> E4XNode<'gc> {
                             namespace: None,
                             local_name: None,
                             kind: E4XNodeKind::Comment(text),
+                            notification: None,
                         },
                     ));
 
@@ -743,6 +769,7 @@ impl<'gc> E4XNode<'gc> {
                             namespace: None,
                             local_name: Some(name),
                             kind: E4XNodeKind::ProcessingInstruction(value),
+                            notification: None,
                         },
                     ));
 
@@ -776,16 +803,13 @@ impl<'gc> E4XNode<'gc> {
             let name =
                 AvmString::new_utf8_bytes(activation.context.gc_context, local_name.into_inner());
             let namespace = match ns {
+                ResolveResult::Bound(ns) if ns.into_inner() == b"http://www.w3.org/2000/xmlns/" => {
+                    continue
+                }
                 ResolveResult::Bound(ns) => Some(AvmString::new_utf8_bytes(
                     activation.context.gc_context,
                     ns.into_inner(),
                 )),
-                ResolveResult::Unknown(ns) if ns == b"xmlns" => continue,
-                // https://www.w3.org/TR/xml-names/#xmlReserved
-                // The prefix xml is by definition bound to the namespace name http://www.w3.org/XML/1998/namespace.
-                ResolveResult::Unknown(ns) if ns == b"xml" => {
-                    Some("http://www.w3.org/XML/1998/namespace".into())
-                }
                 ResolveResult::Unknown(ns) => {
                     return Err(Error::AvmError(type_error(
                         activation,
@@ -810,6 +834,7 @@ impl<'gc> E4XNode<'gc> {
                 namespace,
                 local_name: Some(name),
                 kind: E4XNodeKind::Attribute(value),
+                notification: None,
             };
             let attribute = E4XNode(GcCell::new(activation.context.gc_context, attribute_data));
             attribute_nodes.push(attribute);
@@ -823,9 +848,6 @@ impl<'gc> E4XNode<'gc> {
                 activation.context.gc_context,
                 ns.into_inner(),
             )),
-            ResolveResult::Unknown(ns) if ns == b"xml" => {
-                Some("http://www.w3.org/XML/1998/namespace".into())
-            }
             ResolveResult::Unknown(ns) => {
                 return Err(Error::AvmError(type_error(
                     activation,
@@ -848,6 +870,7 @@ impl<'gc> E4XNode<'gc> {
                 attributes: attribute_nodes,
                 children: Vec::new(),
             },
+            notification: None,
         };
 
         let result = E4XNode(GcCell::new(activation.context.gc_context, data));
@@ -884,6 +907,14 @@ impl<'gc> E4XNode<'gc> {
 
     pub fn parent(&self) -> Option<E4XNode<'gc>> {
         self.0.read().parent
+    }
+
+    pub fn set_notification(&self, notification: Option<FunctionObject<'gc>>, mc: &Mutation<'gc>) {
+        self.0.write(mc).notification = notification;
+    }
+
+    pub fn notification(&self) -> Option<FunctionObject<'gc>> {
+        self.0.read().notification
     }
 
     pub fn matches_name(&self, name: &Multiname<'gc>) -> bool {
@@ -1249,7 +1280,7 @@ pub fn maybe_escape_child<'gc>(
         if child.as_object().map_or(false, |x| {
             x.as_xml_object().is_some() || x.as_xml_list_object().is_some()
         }) {
-            Ok(child)
+            return Ok(child);
         } else {
             let string = child.coerce_to_string(activation)?;
             let xml = activation
@@ -1257,9 +1288,24 @@ pub fn maybe_escape_child<'gc>(
                 .classes()
                 .xml
                 .construct(activation, &[string.into()])?;
-            Ok(xml.into())
+            return Ok(xml.into());
         }
-    } else {
-        Ok(child)
     }
+
+    if activation.caller_movie().unwrap().version() >= 21 {
+        if let Some(xml) = child.as_object().and_then(|x| x.as_xml_object()) {
+            let node = xml.node();
+            let parent = node.parent();
+
+            let index = node.child_index();
+
+            if let Some(parent) = parent {
+                if let Some(index) = index {
+                    parent.delete_by_index(index, activation);
+                }
+            }
+        }
+    }
+
+    Ok(child)
 }

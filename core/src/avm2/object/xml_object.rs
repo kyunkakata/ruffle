@@ -14,7 +14,7 @@ use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
 use ruffle_wstr::WString;
 use std::cell::{Ref, RefMut};
 
-use super::xml_list_object::E4XOrXml;
+use super::xml_list_object::{E4XOrXml, XmlOrXmlListObject};
 use super::PrimitiveObject;
 
 /// A class instance allocator that allocates XML objects.
@@ -68,6 +68,49 @@ impl<'gc> XmlObject<'gc> {
                 node,
             },
         ))
+    }
+
+    pub fn child(
+        &self,
+        name: &Multiname<'gc>,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> XmlListObject<'gc> {
+        let children = if let E4XNodeKind::Element { children, .. } = &*self.node().kind() {
+            if let Some(local_name) = name.local_name() {
+                if let Ok(index) = local_name.parse::<usize>() {
+                    let children = if let Some(node) = children.get(index) {
+                        vec![E4XOrXml::E4X(*node)]
+                    } else {
+                        Vec::new()
+                    };
+
+                    let list = XmlListObject::new_with_children(activation, children, None, None);
+
+                    if list.length() > 0 {
+                        // NOTE: Since avmplus uses appendNode here, when the node exists, that implicitly sets the target_dirty flag.
+                        list.set_dirty_flag(activation.gc());
+                    }
+
+                    return list;
+                }
+            }
+
+            children
+                .iter()
+                .filter(|node| node.matches_name(name))
+                .map(|node| E4XOrXml::E4X(*node))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // FIXME: If name is not a number index, then we should call [[Get]] (get_property_local) with the name.
+        XmlListObject::new_with_children(
+            activation,
+            children,
+            Some(XmlOrXmlListObject::Xml(*self)),
+            Some(name.clone()),
+        )
     }
 
     pub fn length(&self) -> Option<usize> {
@@ -188,7 +231,15 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
     ) -> Option<XmlListObject<'gc>> {
         let mut descendants = Vec::new();
         self.0.read().node.descendants(multiname, &mut descendants);
-        Some(XmlListObject::new(activation, descendants, None, None))
+
+        let list = XmlListObject::new_with_children(activation, descendants, None, None);
+        // NOTE: avmplus does not set a target property/object here, but if there was at least one child
+        //       then the target_dirty flag would be set, since avmplus used appendNode which always sets it.
+        if list.length() > 0 {
+            list.set_dirty_flag(activation.gc());
+        }
+
+        Some(list)
     }
 
     fn get_property_local(
@@ -250,13 +301,20 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             Vec::new()
         };
 
-        return Ok(XmlListObject::new(
+        // NOTE: avmplus does set the target_dirty flag on the list object if there was at least one child
+        //       due to the way avmplus implemented this.
+        let list = XmlListObject::new_with_children(
             activation,
             matched_children,
             Some(self.into()),
             Some(name.clone()),
-        )
-        .into());
+        );
+
+        if list.length() > 0 {
+            list.set_dirty_flag(activation.gc());
+        }
+
+        Ok(list.into())
     }
 
     fn call_property_local(

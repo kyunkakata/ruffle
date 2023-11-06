@@ -298,7 +298,10 @@ export class RufflePlayer extends HTMLElement {
             "context-menu-overlay",
         )!;
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
-        window.addEventListener("pointerdown", this.checkIfTouch.bind(this));
+        document.documentElement.addEventListener(
+            "pointerdown",
+            this.checkIfTouch.bind(this),
+        );
         this.addEventListener("contextmenu", this.showContextMenu.bind(this));
         this.container.addEventListener(
             "pointerdown",
@@ -710,6 +713,42 @@ export class RufflePlayer extends HTMLElement {
             this.panic(e);
             throw e;
         });
+
+        if (this.loadedConfig?.fontSources) {
+            for (const url of this.loadedConfig.fontSources) {
+                try {
+                    const response = await fetch(url);
+                    this.instance!.add_font(
+                        url,
+                        new Uint8Array(await response.arrayBuffer()),
+                    );
+                } catch (error) {
+                    console.warn(
+                        `Couldn't download font source from ${url}`,
+                        error,
+                    );
+                }
+            }
+        }
+
+        if (this.loadedConfig?.defaultFonts?.sans) {
+            this.instance!.set_default_font(
+                "sans",
+                this.loadedConfig?.defaultFonts.sans,
+            );
+        }
+        if (this.loadedConfig?.defaultFonts?.serif) {
+            this.instance!.set_default_font(
+                "serif",
+                this.loadedConfig?.defaultFonts.serif,
+            );
+        }
+        if (this.loadedConfig?.defaultFonts?.typewriter) {
+            this.instance!.set_default_font(
+                "typewriter",
+                this.loadedConfig?.defaultFonts.typewriter,
+            );
+        }
 
         this.instance!.set_volume(this.volumeSettings.get_volume());
 
@@ -1455,7 +1494,7 @@ export class RufflePlayer extends HTMLElement {
             });
         }
 
-        if (window.isSecureContext) {
+        if (navigator.clipboard && window.isSecureContext) {
             items.push({
                 text: text("context-menu-copy-debug-info"),
                 onClick: () =>
@@ -1555,11 +1594,15 @@ export class RufflePlayer extends HTMLElement {
 
         if (event.type === "contextmenu") {
             this.contextMenuSupported = true;
-            window.addEventListener("click", this.hideContextMenu.bind(this), {
-                once: true,
-            });
+            document.documentElement.addEventListener(
+                "click",
+                this.hideContextMenu.bind(this),
+                {
+                    once: true,
+                },
+            );
         } else {
-            window.addEventListener(
+            document.documentElement.addEventListener(
                 "pointerup",
                 this.hideContextMenu.bind(this),
                 { once: true },

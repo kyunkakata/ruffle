@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js ${{ matrix.node_version }}
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node_version }}
           cache: npm
@@ -81,7 +81,7 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
           # Verify that all features build.
-          CARGO_FLAGS: --locked --all-features
+          CARGO_FLAGS: --all-features
         working-directory: web
         shell: bash -l {0}
         run: |

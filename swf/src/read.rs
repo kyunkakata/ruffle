@@ -455,7 +455,7 @@ impl<'a> Reader<'a> {
             TagCode::DefineShape4 => Tag::DefineShape(tag_reader.read_define_shape(4)?),
             TagCode::DefineSound => Tag::DefineSound(Box::new(tag_reader.read_define_sound()?)),
             TagCode::DefineText => Tag::DefineText(Box::new(tag_reader.read_define_text(1)?)),
-            TagCode::DefineText2 => Tag::DefineText(Box::new(tag_reader.read_define_text(2)?)),
+            TagCode::DefineText2 => Tag::DefineText2(Box::new(tag_reader.read_define_text(2)?)),
             TagCode::DefineVideoStream => {
                 Tag::DefineVideoStream(tag_reader.read_define_video_stream()?)
             }
@@ -756,7 +756,6 @@ impl<'a> Reader<'a> {
             records,
             actions: vec![ButtonAction {
                 conditions: ButtonActionCondition::OVER_DOWN_TO_OVER_UP,
-                key_code: None,
                 action_data,
             }],
         })
@@ -885,9 +884,7 @@ impl<'a> Reader<'a> {
     fn read_button_action(&mut self) -> Result<(ButtonAction<'a>, bool)> {
         let length = self.read_u16()?;
         let flags = self.read_u16()?;
-        let mut conditions = ButtonActionCondition::from_bits_truncate(flags);
-        let key_code = (flags >> 9) as u8;
-        conditions.set(ButtonActionCondition::KEY_PRESS, key_code != 0);
+        let conditions = ButtonActionCondition::from_bits_retain(flags);
         let action_data = if length >= 4 {
             self.read_slice(length as usize - 4)?
         } else if length == 0 {
@@ -902,7 +899,6 @@ impl<'a> Reader<'a> {
         Ok((
             ButtonAction {
                 conditions,
-                key_code: if key_code != 0 { Some(key_code) } else { None },
                 action_data,
             },
             length != 0,
@@ -2120,7 +2116,7 @@ impl<'a> Reader<'a> {
 
     fn read_bevel_filter(&mut self) -> Result<BevelFilter> {
         Ok(BevelFilter {
-            // Note that the color order is wrong in the spec, it's hightlight then shadow.
+            // Note that the color order is wrong in the spec, it's highlight then shadow.
             highlight_color: self.read_rgba()?,
             shadow_color: self.read_rgba()?,
             blur_x: self.read_fixed16()?,

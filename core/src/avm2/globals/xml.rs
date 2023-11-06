@@ -216,29 +216,9 @@ pub fn child<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let multiname = name_to_multiname(activation, &args[0], false)?;
-    let children = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
-        if let Some(local_name) = multiname.local_name() {
-            if let Ok(index) = local_name.parse::<usize>() {
-                let children = if let Some(node) = children.get(index) {
-                    vec![E4XOrXml::E4X(*node)]
-                } else {
-                    Vec::new()
-                };
-                return Ok(XmlListObject::new(activation, children, None, None).into());
-            }
-        }
 
-        children
-            .iter()
-            .filter(|node| node.matches_name(&multiname))
-            .map(|node| E4XOrXml::E4X(*node))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // FIXME: If name is not a number index, then we should call [[Get]] (get_property_local) with the name.
-    Ok(XmlListObject::new(activation, children, Some(xml.into()), Some(multiname)).into())
+    let list = xml.child(&multiname, activation);
+    Ok(list.into())
 }
 
 pub fn child_index<'gc>(
@@ -249,25 +229,10 @@ pub fn child_index<'gc>(
     let xml = this.as_xml_object().unwrap();
     let node = xml.node();
 
-    let parent = if let Some(parent) = node.parent() {
-        parent
-    } else {
-        return Ok(Value::Number(-1.0));
-    };
-
-    if let E4XNodeKind::Attribute(_) = &*node.kind() {
-        return Ok(Value::Number(-1.0));
-    }
-
-    if let E4XNodeKind::Element { children, .. } = &*parent.kind() {
-        let index = children
-            .iter()
-            .position(|child| E4XNode::ptr_eq(*child, *node))
-            .unwrap();
-        return Ok(Value::Number(index as f64));
-    }
-
-    unreachable!("parent must be an element")
+    Ok(node
+        .child_index()
+        .map(|x| Value::Number(x as f64))
+        .unwrap_or(Value::Number(-1.0)))
 }
 
 pub fn children<'gc>(
@@ -283,7 +248,7 @@ pub fn children<'gc>(
     };
 
     // FIXME: Spec says to just call [[Get]] with * (any multiname).
-    Ok(XmlListObject::new(
+    Ok(XmlListObject::new_with_children(
         activation,
         children,
         Some(xml.into()),
@@ -337,7 +302,14 @@ pub fn elements<'gc>(
         Vec::new()
     };
 
-    Ok(XmlListObject::new(activation, children, Some(xml.into()), None).into())
+    let list = XmlListObject::new_with_children(activation, children, Some(xml.into()), None);
+
+    if list.length() > 0 {
+        // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
+        list.set_dirty_flag(activation.gc());
+    }
+
+    Ok(list.into())
 }
 
 pub fn attributes<'gc>(
@@ -353,7 +325,7 @@ pub fn attributes<'gc>(
     };
 
     // FIXME: Spec/avmplus says to call [[Get]] with * attribute name (any attribute multiname).
-    Ok(XmlListObject::new(
+    Ok(XmlListObject::new_with_children(
         activation,
         attributes,
         Some(xml.into()),
@@ -380,7 +352,10 @@ pub fn attribute<'gc>(
     };
 
     // FIXME: Spec/avmplus call [[Get]] with attribute name.
-    Ok(XmlListObject::new(activation, attributes, Some(xml.into()), Some(multiname)).into())
+    Ok(
+        XmlListObject::new_with_children(activation, attributes, Some(xml.into()), Some(multiname))
+            .into(),
+    )
 }
 
 pub fn call_handler<'gc>(
@@ -440,65 +415,23 @@ pub fn append_child<'gc>(
     let child = args.get_value(0);
     let child = crate::avm2::e4x::maybe_escape_child(activation, child)?;
 
-    if let Some(child) = child.as_object().and_then(|o| o.as_xml_object()) {
-        xml.node()
-            .append_child(activation.context.gc_context, *child.node())?;
-    } else if let Some(list) = child.as_object().and_then(|o| o.as_xml_list_object()) {
-        for child in &*list.children() {
-            xml.node()
-                .append_child(activation.context.gc_context, *child.node())?;
-        }
-    } else {
-        // Appending a non-XML/XMLList object
-        let (last_child_namespace, last_child_name) =
-            if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
-                let num_children = children.len();
+    // 1. Let children be the result of calling the [[Get]] method of x with argument "*"
+    let name = Multiname::any(activation.gc());
+    let children = xml.get_property_local(&name, activation)?;
 
-                match num_children {
-                    0 => (None, None),
-                    _ => (
-                        children[num_children - 1].namespace(),
-                        children[num_children - 1].local_name(),
-                    ),
-                }
-            } else {
-                // FIXME - figure out exactly when appending is allowed in FP,
-                // and throw the proper AVM error.
-                return Err(Error::RustError(
-                    format!(
-                        "Cannot append child {child:?} to node {:?}",
-                        xml.node().kind()
-                    )
-                    .into(),
-                ));
-            };
+    // 2. Call the [[Put]] method of children with arguments children.[[Length]] and child
+    let xml_list = children
+        .as_object()
+        .and_then(|o| o.as_xml_list_object())
+        .expect("Should have an XMLList");
+    let length = xml_list.length();
+    let name = Multiname::new(
+        activation.avm2().public_namespace,
+        AvmString::new_utf8(activation.context.gc_context, length.to_string()),
+    );
+    xml_list.set_property_local(&name, child, activation)?;
 
-        let text = child.coerce_to_string(activation)?;
-        if let Some(last_child_name) = last_child_name {
-            let element_node = E4XNode::element(
-                activation.context.gc_context,
-                last_child_namespace,
-                last_child_name,
-                Some(*xml.node()),
-            ); // Creating an element requires passing a parent node, unlike creating a text node
-
-            let text_node = E4XNode::text(activation.context.gc_context, text, None);
-
-            element_node
-                .append_child(activation.context.gc_context, text_node)
-                .expect("Appending to an element node should succeed");
-
-            xml.node()
-                .append_child(activation.context.gc_context, element_node)?;
-        } else {
-            let node = E4XNode::text(activation.context.gc_context, text, None);
-            // The text node will be parented in the append_child operation
-
-            xml.node()
-                .append_child(activation.context.gc_context, node)?;
-        }
-    };
-
+    // 3. Return x
     Ok(this.into())
 }
 
@@ -526,9 +459,12 @@ pub fn descendants<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let xml = this.as_xml_object().unwrap();
     let multiname = name_to_multiname(activation, &args[0], false)?;
-    let mut descendants = Vec::new();
-    xml.node().descendants(&multiname, &mut descendants);
-    Ok(XmlListObject::new(activation, descendants, None, None).into())
+
+    // 2. Return the result of calling the [[Descendants]] method of x with argument name
+    Ok(xml
+        .xml_descendants(activation, &multiname)
+        .expect("XmlObject always returns a XmlListObject here")
+        .into())
 }
 
 // ECMA-357 13.4.4.37 XML.prototype.text ( )
@@ -547,9 +483,17 @@ pub fn text<'gc>(
     } else {
         Vec::new()
     };
+
     // 1. Let list be a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    let list = XmlListObject::new_with_children(activation, nodes, Some(xml.into()), None);
+
+    if list.length() > 0 {
+        // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
+        list.set_dirty_flag(activation.gc());
+    }
+
     // 3. Return list
-    Ok(XmlListObject::new(activation, nodes, Some(xml.into()), None).into())
+    Ok(list.into())
 }
 
 pub fn length<'gc>(
@@ -598,8 +542,15 @@ pub fn comments<'gc>(
     };
 
     // 1. Let list be a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    let list = XmlListObject::new_with_children(activation, comments, Some(xml.into()), None);
+
+    if list.length() > 0 {
+        // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
+        list.set_dirty_flag(activation.gc());
+    }
+
     // 3. Return list
-    Ok(XmlListObject::new(activation, comments, Some(xml.into()), None).into())
+    Ok(list.into())
 }
 
 // ECMA-357 13.4.4.28 XML.prototype.processingInstructions ( [ name ] )
@@ -624,8 +575,15 @@ pub fn processing_instructions<'gc>(
     };
 
     // 3. Let list = a new XMLList with list.[[TargetObject]] = x and list.[[TargetProperty]] = null
+    let list = XmlListObject::new_with_children(activation, nodes, Some(xml.into()), None);
+
+    if list.length() > 0 {
+        // NOTE: Since avmplus uses appendNode to build the list here, we need to set target dirty flag.
+        list.set_dirty_flag(activation.gc());
+    }
+
     // 5. Return list
-    Ok(XmlListObject::new(activation, nodes, Some(xml.into()), None).into())
+    Ok(list.into())
 }
 
 // ECMA-357 13.4.4.18 XML.prototype.insertChildAfter (child1, child2)
@@ -785,4 +743,46 @@ pub fn replace<'gc>(
 
     // 10. Return x
     Ok(xml.into())
+}
+
+// ECMA-357 13.4.4.33 XML.prototype.setChildren (value)
+pub fn set_children<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let value = args.get_value(0);
+
+    // 1. Call the [[Put]] method of x with arguments "*" and value
+    xml.set_property_local(&Multiname::any(activation.gc()), value, activation)?;
+
+    // 2. Return x
+    Ok(xml.into())
+}
+
+pub fn set_notification<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_method!(activation, "XML", "setNotification");
+    let xml = this.as_xml_object().unwrap();
+    let node = xml.node();
+    let fun = args.try_get_object(activation, 0);
+    node.set_notification(
+        fun.and_then(|f| f.as_function_object()),
+        activation.context.gc_context,
+    );
+    Ok(Value::Undefined)
+}
+
+pub fn notification<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let xml = this.as_xml_object().unwrap();
+    let node = xml.node();
+    Ok(node.notification().map_or(Value::Null, |fun| fun.into()))
 }
