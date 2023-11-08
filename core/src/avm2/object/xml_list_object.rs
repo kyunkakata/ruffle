@@ -5,7 +5,9 @@ use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname, Namespace};
+use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
+use ruffle_wstr::WString;
 use std::cell::{Ref, RefMut};
 use std::fmt::{self, Debug};
 use std::ops::Deref;
@@ -133,6 +135,18 @@ impl<'gc> XmlListObject<'gc> {
             self.target_object(),
             self.target_property(),
         )
+    }
+
+    pub fn as_xml_string(&self, activation: &mut Activation<'_, 'gc>) -> AvmString<'gc> {
+        let children = self.children();
+        let mut out = WString::new();
+        for (i, child) in children.iter().enumerate() {
+            if i != 0 {
+                out.push_char('\n');
+            }
+            out.push_str(child.node().xml_to_xml_string(activation).as_wstr())
+        }
+        AvmString::new(activation.gc(), out)
     }
 
     // Based on https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/XMLListObject.cpp#L621
@@ -513,7 +527,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
             let child = child.get_or_create_xml(activation);
 
             // 3.a. If x[i].[[Class]] == "element",
-            if matches!(*child.node().kind(), E4XNodeKind::Element { .. }) {
+            if child.node().is_element() {
                 // 3.a.i. Let gq be the result of calling the [[Get]] method of x[i] with argument P
                 let gq = child.get_property_local(name, activation)?;
 
@@ -637,7 +651,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
 
                         // 2.c.ii. If r.[[Class]] is not equal to "element", return
                         if let Some(r) = r {
-                            if !matches!(*r.kind(), E4XNodeKind::Element { .. }) {
+                            if !r.is_element() {
                                 return Ok(());
                             }
                         }
@@ -689,7 +703,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                         index = self.length();
 
                         // 2.c.viii. If (y.[[Class]] is not equal to "attribute")
-                        if !matches!(*y.kind(), E4XNodeKind::Attribute(_)) {
+                        if !y.is_attribute() {
                             // 2.c.viii.1. If r is not null
                             if let Some(r) = r {
                                 let j = if let E4XNodeKind::Element { children, .. } = &*r.kind() {
@@ -766,6 +780,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                                 .xml_object_child(0, activation)
                                 .expect("List length was just verified");
 
+                            // NOTE: avmplus contrary to specification doesn't consider CData here.
                             if matches!(
                                 *xml.node().kind(),
                                 E4XNodeKind::Attribute(_) | E4XNodeKind::Text(_)
@@ -776,6 +791,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                             }
                         }
                     } else if let Some(xml) = value.as_object().and_then(|x| x.as_xml_object()) {
+                        // NOTE: This also doesn't consider CData.
                         if matches!(
                             *xml.node().kind(),
                             E4XNodeKind::Attribute(_) | E4XNodeKind::Text(_)
@@ -792,7 +808,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                     drop(children);
 
                     // 2.e. If x[i].[[Class]] == "attribute"
-                    if matches!(*child.kind(), E4XNodeKind::Attribute(_)) {
+                    if child.is_attribute() {
                         // FIXME: We probably need to take the namespace too.
                         // 2.e.i. Let z = ToAttributeName(x[i].[[Name]])
                         let z = Multiname::attribute(
@@ -852,12 +868,13 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                                     *child = E4XOrXml::E4X(children[q + index]);
                                 }
                             }
+                        }
 
-                            let mut children = self.children_mut(activation.gc());
-                            children.remove(index);
-                            for (index2, child) in c.children().iter().enumerate() {
-                                children.insert(index + index2, child.clone());
-                            }
+                        // 2.f.iv - 2.f.viii.
+                        let mut children = self.children_mut(activation.gc());
+                        children.remove(index);
+                        for (index2, child) in c.children().iter().enumerate() {
+                            children.insert(index + index2, child.clone());
                         }
                     // 2.g. Else if (Type(V) is XML) or (x[i].[[Class]] ∈ {"text", "comment", "processing-instruction"})
                     } else if value
@@ -1031,7 +1048,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
                         let removed = write.children.remove(index);
                         let removed_node = removed.node();
                         if let Some(parent) = removed_node.parent() {
-                            if let E4XNodeKind::Attribute(_) = &*removed_node.kind() {
+                            if removed_node.is_attribute() {
                                 parent
                                     .remove_attribute(activation.context.gc_context, &removed_node);
                             } else {
@@ -1045,7 +1062,7 @@ impl<'gc> TObject<'gc> for XmlListObject<'gc> {
         }
 
         for child in write.children.iter_mut() {
-            if matches!(&*child.node().kind(), E4XNodeKind::Element { .. }) {
+            if child.node().is_element() {
                 child
                     .get_or_create_xml(activation)
                     .delete_property_local(activation, name)?;

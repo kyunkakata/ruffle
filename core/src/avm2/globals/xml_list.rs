@@ -1,7 +1,5 @@
 //! XMLList builtin and prototype
 
-use ruffle_wstr::WString;
-
 pub use crate::avm2::object::xml_list_allocator;
 use crate::avm2::{
     e4x::{name_to_multiname, simple_content_to_string, E4XNode, E4XNodeKind},
@@ -9,7 +7,6 @@ use crate::avm2::{
     multiname::Multiname,
     object::{E4XOrXml, XmlListObject, XmlObject},
     parameters::ParametersExt,
-    string::AvmString,
     Activation, Error, Object, TObject, Value,
 };
 
@@ -17,9 +14,7 @@ fn has_complex_content_inner(children: &[E4XOrXml<'_>]) -> bool {
     match children {
         [] => false,
         [child] => child.node().has_complex_content(),
-        _ => children
-            .iter()
-            .any(|child| matches!(&*child.node().kind(), E4XNodeKind::Element { .. })),
+        _ => children.iter().any(|child| child.node().is_element()),
     }
 }
 
@@ -27,9 +22,7 @@ fn has_simple_content_inner(children: &[E4XOrXml<'_>]) -> bool {
     match children {
         [] => true,
         [child] => child.node().has_simple_content(),
-        _ => children
-            .iter()
-            .all(|child| !matches!(&*child.node().kind(), E4XNodeKind::Element { .. })),
+        _ => children.iter().all(|child| !child.node().is_element()),
     }
 }
 
@@ -140,15 +133,7 @@ pub fn to_xml_string<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let list = this.as_xml_list_object().unwrap();
-    let children = list.children();
-    let mut out = WString::new();
-    for (i, child) in children.iter().enumerate() {
-        if i != 0 {
-            out.push_char('\n');
-        }
-        out.push_str(child.node().xml_to_xml_string(activation).as_wstr())
-    }
-    Ok(AvmString::new(activation.context.gc_context, out).into())
+    Ok(list.as_xml_string(activation).into())
 }
 
 pub fn length<'gc>(
@@ -326,7 +311,7 @@ pub fn text<'gc>(
             nodes.extend(
                 children
                     .iter()
-                    .filter(|node| matches!(&*node.kind(), E4XNodeKind::Text(_)))
+                    .filter(|node| node.is_text())
                     .map(|node| E4XOrXml::E4X(*node)),
             );
         }

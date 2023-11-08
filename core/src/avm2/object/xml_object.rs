@@ -145,6 +145,11 @@ impl<'gc> XmlObject<'gc> {
         XmlObject::new(node.deep_copy(activation.gc()), activation)
     }
 
+    pub fn as_xml_string(&self, activation: &mut Activation<'_, 'gc>) -> AvmString<'gc> {
+        let node = self.node();
+        node.xml_to_xml_string(activation)
+    }
+
     pub fn equals(
         &self,
         other: &Value<'gc>,
@@ -176,25 +181,26 @@ impl<'gc> XmlObject<'gc> {
         // 3.a. If both x and y are the same type (XML)
         if let Value::Object(obj) = other {
             if let Some(xml_obj) = obj.as_xml_object() {
-                if (matches!(
-                    &*self.node().kind(),
-                    E4XNodeKind::Text(_) | E4XNodeKind::CData(_) | E4XNodeKind::Attribute(_)
-                ) && xml_obj.node().has_simple_content())
-                    || (matches!(
-                        &*xml_obj.node().kind(),
-                        E4XNodeKind::Text(_) | E4XNodeKind::CData(_) | E4XNodeKind::Attribute(_)
-                    ) && self.node().has_simple_content())
+                // 3.a.i. If ((x.[[Class]] ∈ {"text", "attribute"}) and (y.hasSimpleContent())
+                // or ((y.[[Class]] ∈ {"text", "attribute"}) and (x.hasSimpleContent())
+                if ((self.node().is_text() || self.node().is_attribute())
+                    && xml_obj.node().has_simple_content())
+                    || ((xml_obj.node().is_text() || xml_obj.node().is_attribute())
+                        && self.node().has_simple_content())
                 {
+                    // 3.a.i.1. Return the result of the comparison ToString(x) == ToString(y)
                     return Ok(self.node().xml_to_string(activation)
                         == xml_obj.node().xml_to_string(activation));
                 }
 
+                // 3.a.i. Else return the result of calling the [[Equals]] method of x with argument y
                 return self.equals(other, activation);
             }
         }
 
-        // 4. If (Type(x) is XML) and x.hasSimpleContent() == true)
+        // 4. If (Type(x) is XML and x.hasSimpleContent() == true)
         if self.node().has_simple_content() {
+            // 4.a. Return the result of the comparison ToString(x) == ToString(y)
             return Ok(self.node().xml_to_string(activation) == other.coerce_to_string(activation)?);
         }
 
@@ -410,20 +416,43 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         }
 
         // 2. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return
-        if !matches!(*self.node().kind(), E4XNodeKind::Element { .. }) {
+        if !self.node().is_element() {
             return Ok(());
         }
 
+        // 3. If (Type(V) ∉ {XML, XMLList}) or (V.[[Class]] ∈ {"text", "attribute"})
+        // 3.a. Let c = ToString(V)
         // 4. Else
         // 4.a. Let c be the result of calling the [[DeepCopy]] method of V
         let value = if let Some(xml) = value.as_object().and_then(|x| x.as_xml_object()) {
-            xml.deep_copy(activation).into()
+            // NOTE: avmplus contrary to specification doesn't consider CData here.
+            if matches!(
+                *xml.node().kind(),
+                E4XNodeKind::Attribute(_) | E4XNodeKind::Text(_)
+            ) {
+                Value::String(value.coerce_to_string(activation)?)
+            } else {
+                xml.deep_copy(activation).into()
+            }
         } else if let Some(list) = value.as_object().and_then(|x| x.as_xml_list_object()) {
-            list.deep_copy(activation).into()
-        // 3. If (Type(V) ∉ {XML, XMLList}) or (V.[[Class]] ∈ {"text", "attribute"})
-        // 3.a. Let c = ToString(V)
+            if list.length() == 1 {
+                let xml = list
+                    .xml_object_child(0, activation)
+                    .expect("List length was just verified");
+
+                if matches!(
+                    *xml.node().kind(),
+                    E4XNodeKind::Attribute(_) | E4XNodeKind::Text(_)
+                ) {
+                    value.coerce_to_string(activation)?.into()
+                } else {
+                    list.deep_copy(activation).into()
+                }
+            } else {
+                list.deep_copy(activation).into()
+            }
         } else {
-            value
+            value.coerce_to_string(activation)?.into()
         };
 
         // 5. Let n = ToXMLName(P)
