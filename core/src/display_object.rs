@@ -252,6 +252,10 @@ pub struct DisplayObjectBase<'gc> {
     #[collect(require_static)]
     next_scroll_rect: Rectangle<Twips>,
 
+    /// Rectangle used for 9-slice scaling (`DislayObject.scale9grid`).
+    #[collect(require_static)]
+    scaling_grid: Rectangle<Twips>,
+
     /// If this Display Object should cacheAsBitmap - and if so, the cache itself.
     /// None means not cached, Some means cached.
     #[collect(require_static)]
@@ -282,6 +286,7 @@ impl<'gc> Default for DisplayObjectBase<'gc> {
             flags: DisplayObjectFlags::VISIBLE,
             scroll_rect: None,
             next_scroll_rect: Default::default(),
+            scaling_grid: Default::default(),
             cache: None,
         }
     }
@@ -1353,7 +1358,8 @@ pub trait TDisplayObject<'gc>:
     /// The width is based on the AABB of the object.
     /// Set by the ActionScript `_width`/`width` properties.
     /// This does odd things on rotated clips to match the behavior of Flash.
-    fn set_width(&self, gc_context: &Mutation<'gc>, value: f64) {
+    fn set_width(&self, context: &mut UpdateContext<'_, 'gc>, value: f64) {
+        let gc_context = context.gc_context;
         let object_bounds = self.bounds();
         let object_width = object_bounds.width().to_pixels();
         let object_height = object_bounds.height().to_pixels();
@@ -1400,7 +1406,8 @@ pub trait TDisplayObject<'gc>:
     /// Sets the pixel height of this display object in local space.
     /// Set by the ActionScript `_height`/`height` properties.
     /// This does odd things on rotated clips to match the behavior of Flash.
-    fn set_height(&self, gc_context: &Mutation<'gc>, value: f64) {
+    fn set_height(&self, context: &mut UpdateContext<'_, 'gc>, value: f64) {
+        let gc_context = context.gc_context;
         let object_bounds = self.bounds();
         let object_width = object_bounds.width().to_pixels();
         let object_height = object_bounds.height().to_pixels();
@@ -1612,6 +1619,14 @@ pub trait TDisplayObject<'gc>:
         if let Some(parent) = self.parent() {
             parent.invalidate_cached_bitmap(gc_context);
         }
+    }
+
+    fn scaling_grid(&self) -> Rectangle<Twips> {
+        self.base().scaling_grid.clone()
+    }
+
+    fn set_scaling_grid(&self, gc_context: &Mutation<'gc>, rect: Rectangle<Twips>) {
+        self.base_mut(gc_context).scaling_grid = rect;
     }
 
     /// Whether this object has been removed. Only applies to AVM1.
@@ -1860,43 +1875,12 @@ pub trait TDisplayObject<'gc>:
     /// object to signal to its parent that it was added.
     #[inline(never)]
     fn on_construction_complete(&self, context: &mut UpdateContext<'_, 'gc>) {
-        if !self.placed_by_script() {
-            // Since we construct AVM2 display objects after they are
-            // allocated and placed on the render list, we have to emit all
-            // events after this point.
-            //
-            // Children added to buttons by the timeline do not emit events.
-            if self.parent().and_then(|p| p.as_avm2_button()).is_none() {
-                dispatch_added_event_only((*self).into(), context);
-                if self.avm2_stage(context).is_some() {
-                    dispatch_added_to_stage_event_only((*self).into(), context);
-                }
-            }
-
-            //TODO: Don't report missing property errors.
-            //TODO: Don't attempt to set properties if object was placed without a name.
-            if self.has_explicit_name() {
-                if let Some(Avm2Value::Object(p)) = self.parent().map(|p| p.object2()) {
-                    if let Avm2Value::Object(c) = self.object2() {
-                        let domain = context
-                            .library
-                            .library_for_movie(self.movie())
-                            .unwrap()
-                            .avm2_domain();
-                        let mut activation =
-                            Avm2Activation::from_domain(context.reborrow(), domain);
-                        let name =
-                            Avm2Multiname::new(activation.avm2().public_namespace, self.name());
-                        if let Err(e) = p.init_property(&name, c.into(), &mut activation) {
-                            tracing::error!(
-                                "Got error when setting AVM2 child named \"{}\": {}",
-                                &self.name(),
-                                e
-                            );
-                        }
-                    }
-                }
-            }
+        let placed_by_script = self.placed_by_script();
+        self.fire_added_events(context);
+        // Check `self.placed_by_script()` before we fire events, since those
+        // events might `placed_by_script`
+        if !placed_by_script {
+            self.set_on_parent_field(context);
         }
 
         if let Some(movie) = self.as_movie_clip() {
@@ -1911,6 +1895,48 @@ pub trait TDisplayObject<'gc>:
             // However, Flash Player runs frames for the root movie clip, even if it doesn't extend `MovieClip`.
             if !obj.is_of_type(movieclip_class, context) && !movie.is_root() {
                 movie.stop(context);
+            }
+        }
+    }
+
+    fn fire_added_events(&self, context: &mut UpdateContext<'_, 'gc>) {
+        if !self.placed_by_script() {
+            // Since we construct AVM2 display objects after they are
+            // allocated and placed on the render list, we have to emit all
+            // events after this point.
+            //
+            // Children added to buttons by the timeline do not emit events.
+            if self.parent().and_then(|p| p.as_avm2_button()).is_none() {
+                dispatch_added_event_only((*self).into(), context);
+                if self.avm2_stage(context).is_some() {
+                    dispatch_added_to_stage_event_only((*self).into(), context);
+                }
+            }
+        }
+    }
+
+    fn set_on_parent_field(&self, context: &mut UpdateContext<'_, 'gc>) {
+        //TODO: Don't report missing property errors.
+        //TODO: Don't attempt to set properties if object was placed without a name.
+        if self.has_explicit_name() {
+            if let Some(Avm2Value::Object(p)) = self.parent().map(|p| p.object2()) {
+                if let Avm2Value::Object(c) = self.object2() {
+                    let domain = context
+                        .library
+                        .library_for_movie(self.movie())
+                        .unwrap()
+                        .avm2_domain();
+                    let mut activation = Avm2Activation::from_domain(context.reborrow(), domain);
+                    let name =
+                        Avm2Multiname::new(activation.avm2().find_public_namespace(), self.name());
+                    if let Err(e) = p.init_property(&name, c.into(), &mut activation) {
+                        tracing::error!(
+                            "Got error when setting AVM2 child named \"{}\": {}",
+                            &self.name(),
+                            e
+                        );
+                    }
+                }
             }
         }
     }

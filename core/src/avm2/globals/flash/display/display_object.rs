@@ -77,6 +77,10 @@ pub fn native_instance_init<'gc>(
                 child.construct_frame(&mut activation.context);
             }
         }
+
+        if let Some(clip) = dobj.as_movie_clip() {
+            clip.remove_flag_constructing_frame(activation.context.gc_context);
+        }
     }
 
     Ok(Value::Undefined)
@@ -130,10 +134,47 @@ pub fn set_height<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.as_display_object() {
         let new_height = args.get_f64(activation, 0)?;
-
         if new_height >= 0.0 {
-            dobj.set_height(activation.context.gc_context, new_height);
+            dobj.set_height(&mut activation.context, new_height);
         }
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `scale9Grid`'s getter.
+pub fn get_scale9grid<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(activation, "flash.display.DisplayObject", "scale9Grid");
+    if let Some(dobj) = this.as_display_object() {
+        let rect = dobj.scaling_grid();
+        return if rect.is_valid() {
+            let rect = new_rectangle(activation, rect)?;
+            Ok(rect.into())
+        } else {
+            Ok(Value::Null)
+        };
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `scale9Grid`'s setter.
+pub fn set_scale9grid<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_setter!(activation, "flash.display.DisplayObject", "scale9Grid");
+    if let Some(dobj) = this.as_display_object() {
+        let rect = match args.try_get_object(activation, 0) {
+            None => Rectangle::default(),
+            Some(rect) => object_to_rectangle(activation, rect)?,
+        };
+        dobj.set_scaling_grid(activation.context.gc_context, rect);
     }
 
     Ok(Value::Undefined)
@@ -187,9 +228,8 @@ pub fn set_width<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.as_display_object() {
         let new_width = args.get_f64(activation, 0)?;
-
         if new_width >= 0.0 {
-            dobj.set_width(activation.context.gc_context, new_width);
+            dobj.set_width(&mut activation.context, new_width);
         }
     }
 

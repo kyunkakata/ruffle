@@ -40,7 +40,7 @@ use swf::{Color, ColorTransform, Twips};
 use super::interactive::Avm2MousePick;
 
 /// The kind of autosizing behavior an `EditText` should have, if any
-#[derive(Copy, Clone, Collect, PartialEq, Eq)]
+#[derive(Copy, Clone, Collect, Debug, PartialEq, Eq)]
 #[collect(no_drop)]
 pub enum AutoSizeMode {
     None,
@@ -107,6 +107,13 @@ pub struct EditTextData<'gc> {
     /// apply.
     autosize: AutoSizeMode,
 
+    // Values set by set_width and set_height.
+    #[collect(require_static)]
+    requested_width: Twips,
+
+    #[collect(require_static)]
+    requested_height: Twips,
+
     /// The calculated layout box.
     layout: Vec<LayoutBox<'gc>>,
 
@@ -158,6 +165,9 @@ pub struct EditTextData<'gc> {
     /// Flags indicating the text field's settings.
     #[collect(require_static)]
     flags: EditTextFlag,
+
+    /// Whether this EditText represents an AVM2 TextLine.
+    is_tlf: bool,
 }
 
 impl<'gc> EditTextData<'gc> {
@@ -298,7 +308,6 @@ impl<'gc> EditText<'gc> {
                     EditTextStatic {
                         swf: swf_movie,
                         id: swf_tag.id(),
-                        bounds: swf_tag.bounds().clone(),
                         layout: swf_tag.layout().cloned(),
                         initial_text: swf_tag
                             .initial_text()
@@ -314,6 +323,8 @@ impl<'gc> EditText<'gc> {
                 intrinsic_bounds,
                 bounds: swf_tag.bounds().clone(),
                 autosize,
+                requested_width: swf_tag.bounds().width(),
+                requested_height: swf_tag.bounds().height(),
                 variable: variable.map(|s| s.to_string_lossy(encoding)),
                 bound_stage_object: None,
                 selection,
@@ -322,6 +333,7 @@ impl<'gc> EditText<'gc> {
                 line_data,
                 scroll: 1,
                 max_chars: swf_tag.max_length().unwrap_or_default() as i32,
+                is_tlf: false,
             },
         ));
 
@@ -366,6 +378,21 @@ impl<'gc> EditText<'gc> {
         }
 
         text_field
+    }
+
+    /// Create a new, dynamic `EditText` representing an AVM2 TextLine.
+    pub fn new_tlf(
+        context: &mut UpdateContext<'_, 'gc>,
+        swf_movie: Arc<SwfMovie>,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Self {
+        let text = Self::new(context, swf_movie, x, y, width, height);
+        text.set_is_tlf(context.gc_context, true);
+
+        text
     }
 
     pub fn text(self) -> WString {
@@ -578,6 +605,14 @@ impl<'gc> EditText<'gc> {
             .set(EditTextFlag::HTML, is_html);
     }
 
+    pub fn is_tlf(self) -> bool {
+        self.0.read().is_tlf
+    }
+
+    pub fn set_is_tlf(self, gc_context: &Mutation<'gc>, is_tlf: bool) {
+        self.0.write(gc_context).is_tlf = is_tlf;
+    }
+
     pub fn replace_text(
         self,
         from: usize,
@@ -719,7 +754,7 @@ impl<'gc> EditText<'gc> {
 
     /// Relayout the `EditText`.
     ///
-    /// This function operats exclusively with the text-span representation of
+    /// This function operates exclusively with the text-span representation of
     /// the text, and no higher-level representation. Specifically, CSS should
     /// have already been calculated and applied to HTML trees lowered into the
     /// text-span representation.
@@ -738,14 +773,27 @@ impl<'gc> EditText<'gc> {
             edit_text.text_spans.clear_displayed_text();
         }
 
+        // Determine the internal width available for content layout.
+        let content_width = if autosize == AutoSizeMode::None || is_word_wrap {
+            edit_text.requested_width - padding
+        } else {
+            edit_text.bounds.width() - padding
+        };
+
         let (new_layout, intrinsic_bounds) = LayoutBox::lower_from_text_spans(
             &edit_text.text_spans,
             context,
             movie,
-            edit_text.bounds.width() - padding,
+            content_width,
             is_word_wrap,
             !edit_text.flags.contains(EditTextFlag::USE_OUTLINES),
         );
+
+        if edit_text.is_tlf {
+            // Resize the TLF textfield to match the height of the text.
+            // FIXME: This should probably be done in text_block::create_text_line.
+            edit_text.bounds.set_height(intrinsic_bounds.extent_y());
+        }
 
         edit_text.line_data = get_line_data(&new_layout);
         edit_text.layout = new_layout;
@@ -769,17 +817,20 @@ impl<'gc> EditText<'gc> {
                 edit_text.bounds.x_min = new_x;
                 edit_text.bounds.set_width(width);
             } else {
-                let width = edit_text.static_data.bounds.width();
+                let width = edit_text.requested_width;
                 edit_text.bounds.set_width(width);
             }
             let height = intrinsic_bounds.height() + padding;
             edit_text.bounds.set_height(height);
-            drop(edit_text);
-            self.redraw_border(context.gc_context);
         } else {
-            drop(edit_text);
-            self.invalidate_cached_bitmap(context.gc_context);
+            let width = edit_text.requested_width;
+            edit_text.bounds.set_width(width);
+            let height = edit_text.requested_height;
+            edit_text.bounds.set_height(height);
         }
+        drop(edit_text);
+        self.redraw_border(context.gc_context);
+        self.invalidate_cached_bitmap(context.gc_context);
     }
 
     /// Measure the width and height of the `EditText`'s current text load.
@@ -1854,14 +1905,12 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             .to_pixels()
     }
 
-    fn set_width(&self, gc_context: &Mutation<'gc>, value: f64) {
-        let mut write = self.0.write(gc_context);
-
-        write.bounds.set_width(Twips::from_pixels(value));
-        write.base.base.set_transformed_by_script(true);
-
-        drop(write);
-        self.redraw_border(gc_context);
+    fn set_width(&self, context: &mut UpdateContext<'_, 'gc>, value: f64) {
+        let mut edit_text = self.0.write(context.gc_context);
+        edit_text.requested_width = Twips::from_pixels(value);
+        edit_text.base.base.set_transformed_by_script(true);
+        drop(edit_text);
+        self.relayout(context);
     }
 
     fn height(&self) -> f64 {
@@ -1871,14 +1920,12 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             .to_pixels()
     }
 
-    fn set_height(&self, gc_context: &Mutation<'gc>, value: f64) {
-        let mut write = self.0.write(gc_context);
-
-        write.bounds.set_height(Twips::from_pixels(value));
-        write.base.base.set_transformed_by_script(true);
-
-        drop(write);
-        self.redraw_border(gc_context);
+    fn set_height(&self, context: &mut UpdateContext<'_, 'gc>, value: f64) {
+        let mut edit_text = self.0.write(context.gc_context);
+        edit_text.requested_height = Twips::from_pixels(value);
+        edit_text.base.base.set_transformed_by_script(true);
+        drop(edit_text);
+        self.relayout(context);
     }
 
     fn set_matrix(&self, gc_context: &Mutation<'gc>, matrix: Matrix) {
@@ -2171,7 +2218,6 @@ bitflags::bitflags! {
 struct EditTextStatic {
     swf: Arc<SwfMovie>,
     id: CharacterId,
-    bounds: swf::Rectangle<Twips>,
     layout: Option<swf::TextLayout>,
     initial_text: Option<WString>,
 }

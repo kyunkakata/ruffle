@@ -6,6 +6,7 @@ use crate::avm1::SystemProperties;
 use crate::avm1::VariableDumper;
 use crate::avm1::{Activation, ActivationIdentifier};
 use crate::avm1::{ScriptObject, TObject, Value};
+use crate::avm2::api_version::ApiVersion;
 use crate::avm2::{
     object::LoaderInfoObject, object::TObject as _, Activation as Avm2Activation, Avm2, CallStack,
     Object as Avm2Object,
@@ -39,6 +40,7 @@ use crate::library::Library;
 use crate::limits::ExecutionLimit;
 use crate::loader::{LoadBehavior, LoadManager};
 use crate::locale::get_current_date_time;
+use crate::net_connection::NetConnections;
 use crate::prelude::*;
 use crate::socket::Sockets;
 use crate::streams::StreamManager;
@@ -167,6 +169,9 @@ struct GcRootData<'gc> {
 
     sockets: Sockets<'gc>,
 
+    /// List of active NetConnection objects.
+    net_connections: NetConnections<'gc>,
+
     /// Dynamic root for allowing handles to GC objects to exist outside of the GC.
     dynamic_root: DynamicRootSet<'gc>,
 }
@@ -195,6 +200,7 @@ impl<'gc> GcRootData<'gc> {
         &mut AudioManager<'gc>,
         &mut StreamManager<'gc>,
         &mut Sockets<'gc>,
+        &mut NetConnections<'gc>,
         DynamicRootSet<'gc>,
     ) {
         (
@@ -215,6 +221,7 @@ impl<'gc> GcRootData<'gc> {
             &mut self.audio_manager,
             &mut self.stream_manager,
             &mut self.sockets,
+            &mut self.net_connections,
             self.dynamic_root,
         )
     }
@@ -377,6 +384,11 @@ impl Player {
         self.instance_counter = 0;
 
         self.mutate_with_update_context(|context| {
+            if context.swf.is_action_script_3() {
+                context.avm2.root_api_version = ApiVersion::from_swf_version(context.swf.version())
+                    .unwrap_or_else(|| panic!("Unknown SWF version {}", context.swf.version()));
+            }
+
             context.stage.set_movie_size(
                 context.gc_context,
                 context.swf.width().to_pixels() as u32,
@@ -549,6 +561,7 @@ impl Player {
             });
 
             self.update_sockets();
+            self.update_net_connections();
             self.update_timers(dt);
             self.update(|context| {
                 StreamManager::tick(context, dt);
@@ -1889,6 +1902,7 @@ impl Player {
                 audio_manager,
                 stream_manager,
                 sockets,
+                net_connections,
                 dynamic_root,
             ) = root_data.update_context_params();
 
@@ -1940,6 +1954,7 @@ impl Player {
                 stub_tracker: &mut self.stub_tracker,
                 stream_manager,
                 sockets,
+                net_connections,
                 dynamic_root,
             };
 
@@ -2058,6 +2073,13 @@ impl Player {
     pub fn update_sockets(&mut self) {
         self.mutate_with_update_context(|context| {
             Sockets::update_sockets(context);
+        })
+    }
+
+    /// Update connected NetConnections.
+    pub fn update_net_connections(&mut self) {
+        self.mutate_with_update_context(|context| {
+            NetConnections::update_connections(context);
         })
     }
 
@@ -2423,6 +2445,7 @@ impl PlayerBuilder {
                     unbound_text_fields: Vec::new(),
                     stream_manager: StreamManager::new(),
                     sockets: Sockets::empty(),
+                    net_connections: NetConnections::default(),
                     dynamic_root,
                 },
             ),

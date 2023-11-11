@@ -24,8 +24,9 @@ const infoContainer = document.getElementById("info-container")!;
 const webFormSubmit = document.getElementById("web-form-submit")!;
 const webURL = document.getElementById("web-url")! as HTMLInputElement;
 
-// Default config used by the player.
-const defaultConfig = {
+// This is the base config always used by the extension player.
+// It has the highest priority and its options cannot be overwritten.
+const baseExtensionConfig = {
     letterbox: "on" as Letterbox,
     forceScale: true,
     forceAlign: true,
@@ -93,7 +94,7 @@ function load(options: string | DataLoadOptions | URLLoadOptions) {
     player = ruffle.createPlayer();
     player.id = "player";
     playerContainer.append(player);
-    player.load(options);
+    player.load(options, false);
     player.addEventListener("loadedmetadata", () => {
         if (player.metadata) {
             for (const [key, value] of Object.entries(player.metadata)) {
@@ -131,7 +132,13 @@ async function loadFile(file: File | undefined) {
         localFileName.textContent = file.name;
     }
     const data = await new Response(file).arrayBuffer();
-    load({ data: data, swfFileName: file.name, ...defaultConfig });
+    const options = await utils.getExplicitOptions();
+    load({
+        ...options,
+        data: data,
+        swfFileName: file.name,
+        ...baseExtensionConfig,
+    });
     history.pushState("", document.title, window.location.pathname);
 }
 
@@ -231,7 +238,7 @@ async function loadSwf(swfUrl: string) {
         ...options,
         url: swfUrl,
         base: swfUrl.substring(0, swfUrl.lastIndexOf("/") + 1),
-        ...defaultConfig,
+        ...baseExtensionConfig,
     });
 }
 

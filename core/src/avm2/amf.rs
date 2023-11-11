@@ -1,3 +1,4 @@
+use crate::avm2::api_version::ApiVersion;
 use crate::avm2::bytearray::ByteArrayStorage;
 use crate::avm2::object::{ByteArrayObject, TObject, VectorObject};
 use crate::avm2::vector::VectorStorage;
@@ -8,6 +9,9 @@ use crate::string::AvmString;
 use enumset::EnumSet;
 use flash_lso::types::{AMFVersion, Element, Lso};
 use flash_lso::types::{Attribute, ClassDefinition, Value as AmfValue};
+
+use super::property::Property;
+use super::{ClassObject, Namespace, QName};
 
 /// Serialize a Value to an AmfValue
 pub fn serialize_value<'gc>(
@@ -25,6 +29,7 @@ pub fn serialize_value<'gc>(
             // whenever it's outside this range, instead of performing this during AMF serialization.
             // Integers are unsupported in AMF0, and must be converted to Number regardless of whether
             // it can be represented as an integer.
+            // FIXME - handle coercion floats like '1.0' to integers
             if amf_version == AMFVersion::AMF0 || num >= (1 << 28) || num < -(1 << 28) {
                 Some(AmfValue::Number(num as f64))
             } else {
@@ -41,7 +46,8 @@ pub fn serialize_value<'gc>(
                 Some(AmfValue::Undefined)
             } else if o.as_array_storage().is_some() {
                 let mut values = Vec::new();
-                recursive_serialize(activation, o, &mut values, amf_version).unwrap();
+                // Don't serialize properties from the vtable (we don't want a 'length' field)
+                recursive_serialize(activation, o, &mut values, None, amf_version).unwrap();
 
                 let mut dense = vec![];
                 let mut sparse = vec![];
@@ -99,12 +105,11 @@ pub fn serialize_value<'gc>(
                                 .expect("Unexpected non-object value in object vector")
                         })
                         .collect();
-                    // Flash always uses an empty type name
-                    Some(AmfValue::VectorObject(
-                        obj_vec,
-                        "".to_string(),
-                        vec.is_fixed(),
-                    ))
+
+                    let val_type = val_type.unwrap_or(activation.avm2().classes().object);
+
+                    let name = class_to_alias(activation, val_type);
+                    Some(AmfValue::VectorObject(obj_vec, name, vec.is_fixed()))
                 }
             } else if let Some(date) = o.as_date_object() {
                 date.date_time()
@@ -118,33 +123,89 @@ pub fn serialize_value<'gc>(
             } else if let Some(bytearray) = o.as_bytearray() {
                 Some(AmfValue::ByteArray(bytearray.bytes().to_vec()))
             } else {
-                let is_object = o
-                    .instance_of()
-                    .map_or(false, |c| c == activation.avm2().classes().object);
-                if is_object {
-                    let mut object_body = Vec::new();
-                    recursive_serialize(activation, o, &mut object_body, amf_version).unwrap();
-                    Some(AmfValue::Object(
-                        object_body,
-                        if amf_version == AMFVersion::AMF3 {
-                            Some(ClassDefinition {
-                                name: "".to_string(),
-                                attributes: EnumSet::only(Attribute::Dynamic),
-                                static_properties: Vec::new(),
-                            })
-                        } else {
-                            None
-                        },
-                    ))
-                } else {
-                    tracing::warn!(
-                        "Serialization is not implemented for class other than Object: {:?}",
-                        o
-                    );
-                    None
+                let class = o.instance_of().expect("Missing ClassObject");
+                let name = class_to_alias(activation, class);
+
+                let mut attributes = EnumSet::empty();
+                if !class.inner_class_definition().read().is_sealed() {
+                    attributes.insert(Attribute::Dynamic);
                 }
+
+                let mut object_body = Vec::new();
+                let mut static_properties = Vec::new();
+                recursive_serialize(
+                    activation,
+                    o,
+                    &mut object_body,
+                    Some(&mut static_properties),
+                    amf_version,
+                )
+                .unwrap();
+                Some(AmfValue::Object(
+                    object_body,
+                    if amf_version == AMFVersion::AMF3 {
+                        Some(ClassDefinition {
+                            name,
+                            attributes,
+                            // FIXME - implement this
+                            static_properties,
+                        })
+                    } else {
+                        None
+                    },
+                ))
             }
         }
+    }
+}
+
+fn alias_to_class<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    alias: AvmString<'gc>,
+) -> Result<ClassObject<'gc>, Error<'gc>> {
+    let mut target_class = activation.avm2().classes().object;
+    let ns = Namespace::package(
+        "flash.net",
+        ApiVersion::AllVersions,
+        &mut activation.context.borrow_gc(),
+    );
+    let method = activation
+        .avm2()
+        .playerglobals_domain
+        .get_defined_value(activation, QName::new(ns, "getClassByAlias"))?;
+
+    let class = method
+        .as_object()
+        .unwrap()
+        .as_function_object()
+        .unwrap()
+        .call(Value::Undefined, &[alias.into()], activation)?;
+    if let Some(class_obj) = class.as_object().and_then(|o| o.as_class_object()) {
+        target_class = class_obj;
+    }
+    Ok(target_class)
+}
+
+fn class_to_alias<'gc>(activation: &mut Activation<'_, 'gc>, class: ClassObject<'gc>) -> String {
+    let qname = QName::new(activation.avm2().flash_net_internal, "_getAliasByClass");
+    let method = activation
+        .avm2()
+        .playerglobals_domain
+        .get_defined_value(activation, qname)
+        .expect("Failed to lookup flash.net._getAliasByClass");
+
+    let alias = method
+        .as_object()
+        .unwrap()
+        .as_function_object()
+        .unwrap()
+        .call(Value::Undefined, &[class.into()], activation)
+        .expect("Failed to call flash.net._getAliasByClass");
+
+    if let Value::Null = alias {
+        "".to_string()
+    } else {
+        alias.coerce_to_string(activation).unwrap().to_string()
     }
 }
 
@@ -153,8 +214,31 @@ pub fn recursive_serialize<'gc>(
     activation: &mut Activation<'_, 'gc>,
     obj: Object<'gc>,
     elements: &mut Vec<Element>,
+    static_properties: Option<&mut Vec<String>>,
     amf_version: AMFVersion,
 ) -> Result<(), Error<'gc>> {
+    if let Some(static_properties) = static_properties {
+        if let Some(vtable) = obj.vtable() {
+            let mut props = vtable.public_properties();
+            // Flash appears to use vtable iteration order, but we sort ours
+            // to make our test output consistent.
+            props.sort_by_key(|(name, _)| name.to_utf8_lossy().to_string());
+            for (name, prop) in props {
+                if let Property::Virtual { get, set } = prop {
+                    if !(get.is_some() && set.is_some()) {
+                        continue;
+                    }
+                }
+                let value = obj.get_public_property(name, activation)?;
+                if let Some(value) = serialize_value(activation, value, amf_version) {
+                    let name = name.to_utf8_lossy().to_string();
+                    elements.push(Element::new(name.clone(), value));
+                    static_properties.push(name);
+                }
+            }
+        }
+    }
+
     let mut last_index = obj.get_next_enumerant(0, activation)?;
     while let Some(index) = last_index {
         let name = obj
@@ -215,17 +299,14 @@ pub fn deserialize_value<'gc>(
             array.into()
         }
         AmfValue::Object(elements, class) => {
-            if let Some(class) = class {
-                if !class.name.is_empty() && class.name != "Object" {
-                    tracing::warn!("Deserializing class {:?} is not supported!", class);
-                }
-            }
+            let target_class = if let Some(class) = class {
+                let name = AvmString::new_utf8(activation.context.gc_context, &class.name);
+                alias_to_class(activation, name)?
+            } else {
+                activation.avm2().classes().object
+            };
+            let obj = target_class.construct(activation, &[])?;
 
-            let obj = activation
-                .avm2()
-                .classes()
-                .object
-                .construct(activation, &[])?;
             for entry in elements {
                 let value = deserialize_value(activation, entry.value())?;
                 obj.set_public_property(
@@ -279,16 +360,14 @@ pub fn deserialize_value<'gc>(
             VectorObject::from_vector(storage, activation)?.into()
         }
         AmfValue::VectorObject(vec, ty_name, is_fixed) => {
-            // Flash always serializes Vector.<SomeType> with an empty type name
-            if !ty_name.is_empty() {
-                tracing::error!("Tried to deserialize Vector with type name: {}", ty_name);
-            }
+            let name = AvmString::new_utf8(activation.context.gc_context, ty_name);
+            let class = alias_to_class(activation, name)?;
             let storage = VectorStorage::from_values(
                 vec.iter()
                     .map(|v| deserialize_value(activation, v))
                     .collect::<Result<Vec<_>, _>>()?,
                 *is_fixed,
-                Some(activation.avm2().classes().object),
+                Some(class),
             );
             VectorObject::from_vector(storage, activation)?.into()
         }
